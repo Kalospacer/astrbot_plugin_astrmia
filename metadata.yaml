@@ -1,0 +1,7 @@
+name: astrbot_plugin_irmia
+display_name: IRMIA 语义核心 (信箱与呼吸心跳)
+desc: 将 I.R.M.I.A 的全局唯一主脑、三层未读信箱、24字群话题概括、半遮面点名通知、read_channel 防刷屏翻阅与 5~60 分钟连续概率呼吸心跳完整引入 AstrBot，并与 AstrHe、LivingMemory 无缝联动。
+version: v0.1.0
+author: Kalo & Qingyi
+repo: https://github.com/Kalospacer/astrbot_plugin_irmia
+astrbot_version: ">=4.16,<5"

@@ -1,0 +1,81 @@
+{
+  "enabled": {
+    "description": "启用 IRMIA 核心语义（全局主脑 + 手边信箱 + 呼吸心跳）",
+    "type": "bool",
+    "default": true,
+    "hint": "总开关。开启后将接管群聊信箱分流、半遮面通知、全局主脑上下文及呼吸式概率心跳。"
+  },
+  "master_umo": {
+    "description": "全局主脑会话 UMO（主屋子）",
+    "type": "string",
+    "default": "",
+    "hint": "形如 aiocqhttp:FriendMessage:你的QQ号。留空时会自动绑定第一个与机器人私聊的管理员会话，所有唤醒均共享该主脑的连续对话记忆。"
+  },
+  "mention_keywords": {
+    "description": "她的称呼/昵称关键词列表",
+    "type": "list",
+    "default": [],
+    "hint": "群聊正文中出现这些词（大小写不敏感）即视为有人在叫她，触发半遮面通知唤醒；未出现且未 @ 她则静默归入信箱计为未读。"
+  },
+  "contacts_map": {
+    "description": "会话与联系人备注名（优先于 AstrHe 关系本）",
+    "type": "list",
+    "default": [],
+    "hint": "每行一条，格式为『UMO或QQ号或群号 = 显示名字』，例如：12345678 = 老哥 或 987654321 = 摸鱼群。"
+  },
+  "group_batch_window_sec": {
+    "description": "群聊点名防大喘气攒批窗口（秒）",
+    "type": "int",
+    "default": 3,
+    "hint": "群友连续发多条 @ 或提及消息时，等待几秒合并为一拍再唤醒主脑；设为 0 则每条立即唤醒。私聊与定时任务不等待。"
+  },
+  "light_provider_id": {
+    "description": "24字群话题概括使用的轻量模型 Provider",
+    "type": "string",
+    "default": "",
+    "_special": "select_provider",
+    "hint": "用于后台生成 24 字以内的『那边在聊：XXX』话题简报。建议选便宜快速的小模型；留空则回退当前默认聊天模型。"
+  },
+  "topic_min_unread": {
+    "description": "后台自动概括群话题的未读条数门槛",
+    "type": "int",
+    "default": 5,
+    "hint": "某个群积累未读消息达到该条数且超过冷却时间时，后台自动用轻量模型概括一次当前话题。"
+  },
+  "topic_cooldown_sec": {
+    "description": "同一群聊自动话题概括的最小冷却间隔（秒）",
+    "type": "int",
+    "default": 180,
+    "hint": "防止活跃水群频繁调用轻量模型概括话题。"
+  },
+  "heartbeat_enabled": {
+    "description": "启用 5~60 分钟连续概率呼吸心跳",
+    "type": "bool",
+    "default": true,
+    "hint": "没人说话时，按随安静时长递增的概率曲线（p = q^alpha）每分钟抽签自然醒来，查看未读信箱与今日待办，自主决定是否找人说话。"
+  },
+  "heartbeat_floor_min": {
+    "description": "心跳安静下限 floor（分钟）",
+    "type": "int",
+    "default": 5,
+    "hint": "安静时长不足该分钟数时命中概率为 0，绝不触发（防止刚聊完立刻又自己叫醒自己）。"
+  },
+  "heartbeat_ceil_min": {
+    "description": "心跳安静上限 ceil（分钟）",
+    "type": "int",
+    "default": 60,
+    "hint": "安静时长达到该分钟数时命中概率为 100%，必然触发一次心跳。"
+  },
+  "heartbeat_target_mean_min": {
+    "description": "心跳目标平均间隔（分钟）",
+    "type": "int",
+    "default": 15,
+    "hint": "期望平均多少分钟自然醒来一次（需介于 floor 与 ceil 之间，启动时自动通过 200 步二分法反解形状指数 alpha）。"
+  },
+  "intercept_direct_reply": {
+    "description": "拦截模型直出文本（开启后仅靠 send_message_to_user 对外发声）",
+    "type": "bool",
+    "default": false,
+    "hint": "危险/进阶开关（默认关闭）。开启后，模型直接输出的普通文字视为『屋里自言自语/内心活动』只记日志不发往 QQ，必须调用 send_message_to_user 工具才对外说话；关闭时保留普通直出回复（输出 [SILENT] 仍可保持沉默）。"
+  }
+}
