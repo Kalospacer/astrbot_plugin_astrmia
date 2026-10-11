@@ -121,6 +121,7 @@ class IrmiaStore:
         self._astrhe_conn: sqlite3.Connection | None = None
         self._astrhe_mtime: float = -1.0
         self._group_names: dict[str, str] = {}
+        self._known_umos: set[str] = set()
         self._alias_cache: dict[str, tuple[str | None, float]] = {}
         self._pending_bot_speeches: dict[str, list[tuple[float, float, str, str]]] = {}
         self._unseen_bot_umos: set[str] = set()
@@ -151,6 +152,13 @@ class IrmiaStore:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.executescript(IRMIA_SCHEMA)
             conn.commit()
+            for r in conn.execute("SELECT umo, group_name FROM session_state").fetchall():
+                u = str(r["umo"] or "")
+                if u:
+                    self._known_umos.add(u)
+                    gn = str(r["group_name"] or "")
+                    if gn:
+                        self._group_names[u] = gn
             self._conn = conn
         return self._conn
 
@@ -382,13 +390,22 @@ class IrmiaStore:
                         ]
                         bucket.append((wall_now, now_ts, str(sender_id or "bot"), text))
                         self._pending_bot_speeches[umo] = bucket[-10:]
-                    if group_name and self._group_names.get(umo) != group_name:
-                        self._group_names[umo] = group_name
+                    need_state_upsert = umo not in self._known_umos or (
+                        bool(group_name) and self._group_names.get(umo) != group_name
+                    )
+                    if need_state_upsert:
+                        self._known_umos.add(umo)
+                        if group_name:
+                            self._group_names[umo] = group_name
                         async with self._lock:
                             conn = self._ensure_conn()
                             conn.execute(
-                                "INSERT INTO session_state(umo, group_name, updated_at) VALUES(?, ?, ?) "
-                                "ON CONFLICT(umo) DO UPDATE SET group_name=excluded.group_name, updated_at=excluded.updated_at",
+                                """
+                                INSERT INTO session_state(umo, group_name, updated_at) VALUES(?, ?, ?)
+                                ON CONFLICT(umo) DO UPDATE SET
+                                    group_name = CASE WHEN excluded.group_name != '' THEN excluded.group_name ELSE session_state.group_name END,
+                                    updated_at = excluded.updated_at
+                                """,
                                 (umo, group_name, now_ts),
                             )
                             conn.commit()
@@ -396,11 +413,15 @@ class IrmiaStore:
             except Exception:
                 pass
 
-        # 否则在同一事务内更新 session_state（若有新 group_name）并写入 fallback_messages
+        # 否则在同一事务内更新 session_state（首次建档或更新 group_name）并写入 fallback_messages
         async with self._lock:
             conn = self._ensure_conn()
-            if group_name and self._group_names.get(umo) != group_name:
-                self._group_names[umo] = group_name
+            if umo not in self._known_umos or (
+                group_name and self._group_names.get(umo) != group_name
+            ):
+                self._known_umos.add(umo)
+                if group_name:
+                    self._group_names[umo] = group_name
                 conn.execute(
                     """
                     INSERT INTO session_state(umo, group_name, updated_at) VALUES(?, ?, ?)
@@ -486,6 +507,7 @@ class IrmiaStore:
                 else cur_pending
             )
             now_ts = time.time()
+            self._known_umos.add(umo)
             conn.execute(
                 """
                 INSERT INTO session_state(umo, read_up_to_id, pending_not_shown, updated_at)
@@ -506,6 +528,7 @@ class IrmiaStore:
         now_ts = updated_at if updated_at is not None else time.time()
         async with self._lock:
             conn = self._ensure_conn()
+            self._known_umos.add(umo)
             conn.execute(
                 """
                 INSERT INTO session_state(umo, topic, topic_to_id, topic_updated_at, updated_at)
@@ -659,10 +682,11 @@ class IrmiaStore:
                     f"""
                     SELECT m.umo, m.platform_id, m.message_type, m.session_id,
                            m.sender_id, m.sender_name, m.sender_card, m.text, m.ts,
-                           stats.total_cnt
+                           stats.total_cnt, stats.live_cnt
                     FROM {table} m
                     INNER JOIN (
-                        SELECT umo, MAX(id) AS max_id, COUNT(*) AS total_cnt
+                        SELECT umo, MAX(id) AS max_id, COUNT(*) AS total_cnt,
+                               SUM(CASE WHEN source = 'live' THEN 1 ELSE 0 END) AS live_cnt
                         FROM {table}
                         WHERE recalled=0
                         GROUP BY umo
@@ -678,6 +702,13 @@ class IrmiaStore:
                     not umo
                     or umo in seen_umos
                     or umo.startswith(("astrhe:", "cron:", "irmia:"))
+                ):
+                    continue
+                # 排除 AstrHe 绕过管线大门拉取的纯 backfill 且从未在本插件建档的非白名单野群
+                if (
+                    table == "messages"
+                    and umo not in states
+                    and int(r["live_cnt"] or 0) <= 0
                 ):
                     continue
                 seen_umos.add(umo)

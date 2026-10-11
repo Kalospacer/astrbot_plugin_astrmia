@@ -1,1 +1,1 @@
-"""astrbot_plugin_irmia 核心逻辑包。"""
+"""astrbot_plugin_astrmia (AstrMia) 核心逻辑包。"""

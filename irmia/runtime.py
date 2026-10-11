@@ -53,7 +53,7 @@ except Exception:  # pragma: no cover - 单元测试环境兼容
     MessageSession = None  # type: ignore[assignment]
     StarTools = None  # type: ignore[assignment]
 
-PLUGIN_NAME = "astrbot_plugin_irmia"
+PLUGIN_NAME = "astrbot_plugin_astrmia"
 SEND_OK_PREFIX = "Message sent to session"
 
 
@@ -897,7 +897,7 @@ class IrmiaRuntime:
     # ---------------- 状态诊断 ----------------
 
     async def status_report(self) -> str:
-        """生成 /irmia status 状态摘要文本。"""
+        """生成 /astrmia status 状态摘要文本。"""
         cfg = self.cfg()
         master_umo = await self.resolve_master_umo()
         dist = self.heartbeat.distribution()
@@ -911,7 +911,7 @@ class IrmiaRuntime:
         )
 
         lines = [
-            "=== IRMIA 运行状态 ===",
+            "=== AstrMia 运行状态 ===",
             f"总开关：{'开启' if cfg.enabled else '关闭'}",
             f"全局主脑会话：{master_umo or '（待管理员首次私聊自动绑定）'}",
             f"AstrHe 账本/关系本联动：{astrhe_linked}",

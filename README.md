@@ -1,4 +1,4 @@
-# astrbot_plugin_irmia
+# AstrMia (`astrbot_plugin_astrmia`)
 
 将 **I.R.M.I.A** 的「全局唯一主脑 + 手边三层未读信箱 + 24字群话题概括 + 群点名半遮面通知 + `read_channel` 防刷屏翻阅 + 5~60分钟连续概率呼吸心跳」完整引入 AstrBot，并与 **AstrHe**、**LivingMemory** 无缝联动。
 
@@ -25,5 +25,5 @@
 
 ## 管理员指令
 
-- `/irmia status`：查看全局主脑绑定状态、AstrHe 联动状态、心跳分布参数（$\alpha$、已安静时长、下一拍命中概率）及外部会话未读信箱列表。
-- `/irmia wake [备注]`：手动触发一次全局主脑静默唤醒。
+- `/astrmia status`（或 `/irmia status`）：查看全局主脑绑定状态、AstrHe 联动状态、心跳分布参数（$\alpha$、已安静时长、下一拍命中概率）及外部会话未读信箱列表。
+- `/astrmia wake [备注]`（或 `/irmia wake [备注]`）：手动触发一次全局主脑静默唤醒。

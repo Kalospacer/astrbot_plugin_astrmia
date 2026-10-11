@@ -1,4 +1,4 @@
-"""astrbot_plugin_irmia 插件入口：薄入口，只负责装配 IrmiaRuntime 与注册事件钩子、管理员指令。"""
+"""astrbot_plugin_astrmia 插件入口：薄入口，只负责装配 IrmiaRuntime 与注册事件钩子、管理员指令。"""
 
 from __future__ import annotations
 
@@ -16,8 +16,8 @@ except ImportError:  # pragma: no cover - 顶层直接导入兼容
     from irmia.runtime import IrmiaRuntime
 
 
-class IrmiaPlugin(Star):
-    """IRMIA 语义核心插件主类。"""
+class AstrMiaPlugin(Star):
+    """AstrMia 语义核心插件主类。"""
 
     def __init__(self, context: Context, config: dict[str, Any] | None = None) -> None:
         super().__init__(context)
@@ -88,9 +88,28 @@ class IrmiaPlugin(Star):
 
     # ---------------- 管理员指令 ----------------
 
+    @filter.command_group("astrmia")
+    def astrmia_group(self) -> None:
+        """AstrMia 管理指令组。"""
+        pass
+
+    @filter.permission_type(PermissionType.ADMIN)
+    @astrmia_group.command("status")
+    async def cmd_astrmia_status(self, event: AstrMessageEvent):
+        """查看全局主脑会话、呼吸心跳参数与外部会话未读信箱状态。"""
+        report = await self.runtime.status_report()
+        yield event.plain_result(report)
+
+    @filter.permission_type(PermissionType.ADMIN)
+    @astrmia_group.command("wake")
+    async def cmd_astrmia_wake(self, event: AstrMessageEvent, note: str = ""):
+        """手动触发一次全局主脑静默唤醒。"""
+        res = await self.runtime.trigger_wake_turn(manual_note=note)
+        yield event.plain_result(f"[AstrMia 唤醒完成] {res}")
+
     @filter.command_group("irmia")
     def irmia_group(self) -> None:
-        """IRMIA 管理指令组。"""
+        """IRMIA 管理指令组（兼容别名）。"""
         pass
 
     @filter.permission_type(PermissionType.ADMIN)
@@ -105,4 +124,4 @@ class IrmiaPlugin(Star):
     async def cmd_wake(self, event: AstrMessageEvent, note: str = ""):
         """手动触发一次全局主脑静默唤醒。"""
         res = await self.runtime.trigger_wake_turn(manual_note=note)
-        yield event.plain_result(f"[IRMIA 唤醒完成] {res}")
+        yield event.plain_result(f"[AstrMia 唤醒完成] {res}")

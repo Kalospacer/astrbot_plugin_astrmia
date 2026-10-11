@@ -71,11 +71,17 @@ def test_astrhe_database_bridge(tmp_path: Path) -> None:
         "VALUES(?,?,?,?,?,?,?,?,?,?)",
         (umo, "aiocqhttp", "GroupMessage", "777879783", "999999", "Bot", "哼哼那当然啦", 1700000030.0, 1, 0),
     )
+    # 模拟 AstrHe 启动时绕过白名单管线拉取的纯 backfill 野群，不应出现在信箱列表中
+    conn.execute(
+        "INSERT INTO messages(umo, platform_id, message_type, session_id, sender_id, sender_name, text, ts, is_bot, recalled, source) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        ("aiocqhttp:GroupMessage:534017924", "aiocqhttp", "GroupMessage", "534017924", "888888", "野群路人", "不在白名单的历史消息", 1700000005.0, 0, 0, "backfill"),
+    )
     conn.commit()
     conn.close()
 
     async def _run() -> None:
-        store = IrmiaStore(tmp_path / "astrbot_plugin_irmia", astrhe_db_path=astrhe_db)
+        store = IrmiaStore(tmp_path / "astrbot_plugin_astrmia", astrhe_db_path=astrhe_db)
         await store.open()
 
         # 验证从 AstrHe persons 表解析别名
