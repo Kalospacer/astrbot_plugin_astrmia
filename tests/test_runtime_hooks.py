@@ -268,6 +268,7 @@ def test_runtime_end_to_end_flow(tmp_path: Path) -> None:
         assert grp_mention.get_extra("irmia_sent_current_session") is True
 
         # 6. 测试 [SILENT] 静默与 intercept_direct_reply 开关
+        await rt.on_llm_response(grp_mention)
         grp_mention._result = FakeResult(text="[SILENT]")
         await rt.on_decorating_result(grp_mention)
         assert grp_mention._result.chain == []
@@ -277,7 +278,7 @@ def test_runtime_end_to_end_flow(tmp_path: Path) -> None:
         await rt.on_decorating_result(grp_mention)
         assert grp_mention._result.chain == []
 
-        # 6b. 测试当前会话 send_message_to_user 暂存回流到 result.chain（供后续表情与分段插件处理）
+        # 6b. 测试工具调用途中的过渡话被收起、不提前开启 irmia_in_decorating，且最终步回流到 result.chain
         grp_mention2 = FakeEvent(
             grp_umo,
             "清漪在吗",
@@ -288,11 +289,19 @@ def test_runtime_end_to_end_flow(tmp_path: Path) -> None:
         )
         req2 = FakeReq(prompt="清漪在吗")
         await rt.on_llm_request(grp_mention2, req2)
+        # Step 1: 调 read_channel 前模型顺嘴吐出过渡话 -> 被收起且不置 irmia_in_decorating
+        grp_mention2._result = FakeResult(text="我先看看上下文。")
+        await rt.on_decorating_result(grp_mention2)
+        assert grp_mention2._result.chain == []
+        assert grp_mention2.get_extra("irmia_in_decorating") is False
+        # Step 2: 调 send_message_to_user 发当前会话 -> 成功暂存回流
         from types import SimpleNamespace as _SNS
         tool_mc = _SNS(chain=["真实回复第一句。真实回复第二句。"])
         sent_ok = await ctx.send_message(grp_umo, tool_mc)
         assert sent_ok is True
         assert ctx.sent_messages == []  # 尚未裸发，已暂存等流水线装饰
+        # Step 3: 最终步触发 on_llm_response 后进入 on_decorating_result -> 替换末尾总结为暂存链
+        await rt.on_llm_response(grp_mention2)
         grp_mention2._result = FakeResult(text="我回了老哥一句。")
         await rt.on_decorating_result(grp_mention2)
         assert grp_mention2._result.chain == ["真实回复第一句。真实回复第二句。"]

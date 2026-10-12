@@ -283,9 +283,13 @@ async def execute_read_channel(
         if triggered.items:
             display = triggered.items
             mentioned_set = triggered.mentioned_ids
-        elif unread_fits_one_screen or "group" not in mtype.lower():
+        elif unread_fits_one_screen or "group" not in mtype.lower() or called_this_turn:
             display = unread[-eff_limit:]
             mentioned_set = set()
+            if called_this_turn:
+                last_ext = next((m for m in reversed(display) if not m.is_bot), None)
+                if last_ext is not None:
+                    mentioned_set.add(last_ext.id)
         else:
             display = []
             mentioned_set = set()

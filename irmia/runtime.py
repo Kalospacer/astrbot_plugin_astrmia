@@ -407,6 +407,13 @@ class IrmiaRuntime:
         )
         if self_id:
             self._bot_self_ids.add(self_id)
+            msg_obj_at = getattr(event, "message_obj", None)
+            for comp in getattr(msg_obj_at, "message", None) or []:
+                if comp.__class__.__name__ == "At":
+                    comp_qq = str(getattr(comp, "qq", "") or "").strip()
+                    comp_name = str(getattr(comp, "name", "") or "").strip().lstrip("@")
+                    if comp_qq == self_id and comp_name:
+                        self._bot_self_ids.add(comp_name)
 
         sender_id = ""
         sender_name = ""
@@ -565,6 +572,8 @@ class IrmiaRuntime:
         umo = str(getattr(event, "unified_msg_origin", "") or "").strip()
         if hasattr(event, "set_extra"):
             event.set_extra("irmia_repeat_reads", {})
+            event.set_extra("irmia_final_llm_resp", False)
+            event.set_extra("irmia_in_decorating", False)
         self._last_active_event = event
         self._current_chat_event.set(event)
         is_wake = bool(event.get_extra("irmia_wake")) if hasattr(event, "get_extra") else False
@@ -776,11 +785,20 @@ class IrmiaRuntime:
         mc.chain = list(buffered)
         self._spawn_bg(self.context.send_message(umo, mc))
 
-    async def on_decorating_result(self, event: Any) -> None:
-        """处理 [SILENT] 静默标记，以及工具回复当前窗口时的回流替换（intercept_direct_reply）。
+    async def on_llm_response(self, event: Any, resp: Any = None) -> None:
+        """核心仅在无 tool_calls 的最终回复步触发 OnLLMResponseEvent，标记已进入最终回复阶段。"""
+        if is_internal_silent_event(event) or not self.cfg().enabled:
+            return
+        if hasattr(event, "set_extra"):
+            event.set_extra("irmia_final_llm_resp", True)
 
-        若模型在本轮通过 send_message_to_user 发往当前唤醒窗口，暂存的真实回复链会在此处
-        替换掉模型末尾的自言自语总结，继续交给后续装饰钩子（表情包替换、分段发送）。
+    async def on_decorating_result(self, event: Any) -> None:
+        """处理工具调用途中的过渡文字拦截、[SILENT] 静默标记，以及工具回复当前窗口时的回流替换。
+
+        1. 在 OnLLMResponseEvent 触发前（即模型仍在调用 read_channel / send_message_to_user 的中间步骤），
+           模型顺嘴输出的过渡文字（preamble）在此直接收起，不发往聊天窗口，也不开启 irmia_in_decorating。
+        2. 最终步若模型曾通过 send_message_to_user 发往当前唤醒窗口，暂存的真实回复链在此处替换掉
+           模型末尾的自言自语总结，继续交给后续装饰钩子（表情包替换、分段发送）。
         """
         if is_internal_silent_event(event):
             return
@@ -789,8 +807,6 @@ class IrmiaRuntime:
             return
         if hasattr(event, "get_extra") and event.get_extra("handlers_parsed_params"):
             return
-        if hasattr(event, "set_extra"):
-            event.set_extra("irmia_in_decorating", True)
 
         result = getattr(event, "get_result", lambda: None)()
         if result is None or not getattr(result, "chain", None):
@@ -802,6 +818,21 @@ class IrmiaRuntime:
             plain_text = result.get_plain_text().strip()
         except Exception:
             plain_text = ""
+
+        # 若尚未经过 on_llm_response（显式设为了 False），说明是工具循环中间步骤的过渡话，直接收起
+        is_final = (
+            event.get_extra("irmia_final_llm_resp")
+            if hasattr(event, "get_extra")
+            else None
+        )
+        if is_final is False:
+            if plain_text:
+                self.logger.info(f"[IRMIA 收起工具调用过渡文字] {plain_text}")
+            result.chain = []
+            return
+
+        if hasattr(event, "set_extra"):
+            event.set_extra("irmia_in_decorating", True)
 
         if cfg.intercept_direct_reply and event.get_extra("irmia_sent_current_session"):
             if hasattr(event, "set_extra"):

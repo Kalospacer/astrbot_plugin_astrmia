@@ -54,6 +54,11 @@ class AstrMiaPlugin(Star):
         """绑定全局主脑历史、替换群点名半遮面通知、注入此刻层与外部会话未读信箱清单。"""
         await self.runtime.on_llm_request(event, req)
 
+    @filter.on_llm_response(priority=sys.maxsize - 4)
+    async def handle_llm_response(self, event: AstrMessageEvent, resp: Any) -> None:
+        """标记当前事件已进入最终 LLM 回复阶段（用于区分调工具途中的过渡文字与最终回复）。"""
+        await self.runtime.on_llm_response(event, resp)
+
     @filter.on_llm_tool_respond()
     async def handle_tool_respond(
         self,
