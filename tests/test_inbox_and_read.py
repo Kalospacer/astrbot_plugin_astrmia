@@ -73,7 +73,7 @@ def test_read_channel_five_branches_and_paging(tmp_path: Path) -> None:
             bot_self_ids={"999999"},
         )
         assert "最近 3 条" in first_out
-        assert "已标记读过 id=3" in first_out
+        assert "已读到 id=3" in first_out
         st = await store.get_session_state(umo)
         assert st["read_up_to_id"] == 3
 
@@ -85,7 +85,7 @@ def test_read_channel_five_branches_and_paging(tmp_path: Path) -> None:
             limit=20,
             repeat_counter=repeat_map,
         )
-        assert "没有新消息：你已经读到最新了" in empty_out
+        assert "没有新消息，已经读到最新" in empty_out
 
         # 模拟水群刷屏：连续塞入 25 条新消息（id 4..28），其中第 18 条提到了『弥亚』，第 20 条是机器人自己的回复
         for i in range(4, 29):
@@ -117,8 +117,8 @@ def test_read_channel_five_branches_and_paging(tmp_path: Path) -> None:
         )
         assert "▶ [" in digest_out and "弥亚快来评评理！" in digest_out
         # 已读水位线只按实际展示的最大非 bot 消息 #18 推进，#19..#28 中的 9 条非 bot 消息保持未读
-        assert "已标记读过 id=18" in digest_out
-        assert "另有 9 条你还没看——往上翻页：带上 before=29 重读一次" in digest_out
+        assert "已读到 id=18" in digest_out
+        assert "还有 9 条未读没列出来，传 before=29 往前翻能看到" in digest_out
         assert "before=8" in digest_out
         st_after = await store.get_session_state(umo)
         assert st_after["read_up_to_id"] == 18
@@ -130,7 +130,7 @@ def test_read_channel_five_branches_and_paging(tmp_path: Path) -> None:
             before=29,
             limit=10,
         )
-        assert "从 before=29 往前 10 条" in page_out
+        assert "before=29 之前的 10 条" in page_out
         assert "（我）: 我刚睡醒呢" in page_out
         assert "翻页不改已读" in page_out
         st_paged = await store.get_session_state(umo)
@@ -174,7 +174,7 @@ def test_read_channel_five_branches_and_paging(tmp_path: Path) -> None:
 
 
 def test_render_mention_notice_and_session_list(tmp_path: Path) -> None:
-    """验证半遮面通知卡与外部会话清单的渲染格式。"""
+    """验证点名通知与外部会话清单的渲染格式。"""
     notice = render_mention_notice(
         umo="aiocqhttp:GroupMessage:888888",
         where_name="摸鱼群",
@@ -184,8 +184,8 @@ def test_render_mention_notice_and_session_list(tmp_path: Path) -> None:
         unread=12,
         topic="讨论周末聚餐地点",
     )
-    assert "有人在 摸鱼群 里@ 了你（这次是 阿强）（18:30 到的这一条）（这一条你还没看过）" in notice
-    assert "积了 12 条没看" in notice
+    assert "18:30，摸鱼群 里有人@了你（是 阿强）" in notice
+    assert "那边一共有 12 条未读" in notice
     assert "那边在聊：讨论周末聚餐地点。" in notice
     assert "read_channel" in notice
 
@@ -208,7 +208,7 @@ def test_render_mention_notice_and_session_list(tmp_path: Path) -> None:
         sessions = await store.list_sessions()
         rendered = render_session_list(sessions, lambda s: s.group_name)
         assert "摸鱼群｜sid aiocqhttp:GroupMessage:888888" in rendered
-        assert "｜1 条没看｜在聊：大家在打招呼" in rendered
+        assert "｜1 条未读｜在聊：大家在打招呼" in rendered
         await store.close()
 
     asyncio.run(_run())

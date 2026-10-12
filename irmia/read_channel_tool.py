@@ -28,11 +28,6 @@ READ_CHANNEL_MENTION_CONTEXT = 10
 SELF_SPEAK_LABEL = "（我）"
 MENTION_ROW_MARK = "▶ "
 
-SENT_CREDENTIAL_NOTE = (
-    "\n已送达凭据：这个会话的「我说过什么」里已经有这一篇了"
-    "（`read_channel` 里那一行行首是 `（我）`），不必为了确认再发一遍。"
-)
-
 
 def _is_row_mentioning_me(
     row: ChannelMessageRow,
@@ -102,10 +97,10 @@ def _paging_footer(
     """生成页脚翻页指路说明。"""
     if more and next_before > 1:
         return (
-            f"—— 往上还有更早的记录：想接着往回翻就传 before={next_before} "
+            f"—— 更早的记录：传 before={next_before} 往前翻"
             f"（每页 {page_size} 条，翻页不改已读）。"
         )
-    return "—— 已经到这个会话最早一条记录了，上面没有更早的。"
+    return "—— 已经是这个会话最早的记录了。"
 
 
 async def execute_read_channel(
@@ -126,8 +121,8 @@ async def execute_read_channel(
     pid, mtype, session_id = parse_umo(target_sid)
     if not pid or not mtype or not session_id:
         return (
-            f"sid 不是合法的会话标识：{target_sid}。"
-            "它就在你上下文的外部会话清单里（形如 aiocqhttp:GroupMessage:群号）。"
+            f"sid 格式不对：{target_sid}。"
+            "会话清单里的 sid 长这样：aiocqhttp:GroupMessage:群号。"
         )
 
     is_paging = before is not None and int(before) > 0
@@ -179,9 +174,9 @@ async def execute_read_channel(
         )
         if not batch:
             return (
-                f"{target_sid} 里没有比 before={cursor_before} 更早的记录了。"
-                "——要么已经翻到头，要么这个游标不属于该会话。"
-                "想看当前未读，就不带 before 读一次。"
+                f"{target_sid} 在 before={cursor_before} 之前没有记录了。"
+                "可能已经翻到头，也可能这个游标不是这个会话的。"
+                "想看未读就不带 before 再读一次。"
             )
         where_label = store.resolve_session_name(
             target_sid,
@@ -192,8 +187,8 @@ async def execute_read_channel(
         )
         mentioned = _mentioned_ids(batch)
         header = (
-            f"{target_sid} 从 before={cursor_before} 往前 {len(batch)} 条"
-            f"（本机时间，正序；**翻页不改已读**）· {where_label}"
+            f"{target_sid} · {where_label}｜before={cursor_before} 之前的 {len(batch)} 条"
+            "（本机时间，从旧到新；翻页不改已读）"
         )
         footer = _paging_footer(
             next_before=batch[0].id,
@@ -207,8 +202,7 @@ async def execute_read_channel(
     pool = store.fetch_messages(target_sid, limit=pool_size)
     if not pool:
         return (
-            f"{target_sid} 里没有取到消息（这个会话可能还没有过记录，或者 sid 写错了）。"
-            "请核对当前状态层外部会话清单里的 sid。"
+            f"{target_sid} 里没有消息。可能这个会话还没有记录，也可能 sid 写错了，对一下会话清单。"
         )
 
     prev_read_id = int(st.get("read_up_to_id", 0) or 0)
@@ -252,23 +246,21 @@ async def execute_read_channel(
             times = repeat_counter.get(target_sid, 0) + 1
             repeat_counter[target_sid] = times
         has_own = any(m.is_bot for m in pool)
-        mine_note = (
-            "；这个位置含你自己发出去的那些（行首 `（我）`）" if has_own else ""
-        )
+        mine_note = "，包括你自己发的（行首（我））" if has_own else ""
         way = (
-            f"要看更早的（连没点你的那些）就翻页：带上 before={newest_id + 1} 重读一次"
+            f"要看更早的（包括没叫你的）就传 before={newest_id + 1} 往前翻"
             f"（每页 {READ_CHANNEL_PAGE_SIZE} 条，翻页不改已读）。"
             if len(pool) > 0
-            else "想看更早的没有了——这个会话能看到的就这些。"
+            else "没有更早的了。"
         )
         if times <= 1:
             return (
-                f"{target_sid} 没有新消息：你已经读到最新了（停在 id={newest_id}{mine_note}）。"
-                f"不必再翻一遍——{way}想接着说就直接调 send_message_to_user，回不回、说什么都由你。"
+                f"{target_sid} 没有新消息，已经读到最新（id={newest_id}{mine_note}）。"
+                f"不用再读一遍。{way}想说话就用 send_message_to_user。"
             )
         return (
-            f"{target_sid} 还是没有新消息：这一轮你已经读过它 {times} 次，再读返回的还是同一段"
-            f"（停在 id={newest_id}{mine_note}）。{way}"
+            f"{target_sid} 还是没有新消息。这一轮你已经读了 {times} 次，结果都一样"
+            f"（id={newest_id}{mine_note}）。{way}"
         )
 
     # ── ③ 五分支防刷屏精选（合并分支 1/2，按需延迟调用 select_mention_digest） ──
@@ -304,9 +296,8 @@ async def execute_read_channel(
     if not display:
         asked_cnt = store.count_unread(target_sid, prev_read_id)
         return (
-            f"{target_sid} 没有点了你的新消息"
-            f"（这里攒着 {asked_cnt} 条没点你的新话，先不摆出来）。"
-            f"想看就翻页：带上 before={newest_id + 1} 重读一次"
+            f"{target_sid} 没有叫你的新消息。另外有 {asked_cnt} 条没叫你的新消息，这次没列出来。"
+            f"想看就传 before={newest_id + 1} 往前翻"
             f"（每页 {READ_CHANNEL_PAGE_SIZE} 条，翻页不改已读）。"
         )
 
@@ -337,21 +328,21 @@ async def execute_read_channel(
     )
     comp_parts = []
     if at_count > 0:
-        comp_parts.append(f"其中点你的 {at_count} 条")
+        comp_parts.append(f"{at_count} 条叫了你")
     if mine_count > 0:
-        comp_parts.append(f"其中你自己的发言 {mine_count} 行")
+        comp_parts.append(f"{mine_count} 条是你自己发的")
     comp_str = ("，" + "，".join(comp_parts)) if comp_parts else ""
 
     pending_cursor = newest_id + 1
     pending_line = (
-        f"另有 {not_shown} 条你还没看——往上翻页：带上 before={pending_cursor} 重读一次"
-        f"（每页 {READ_CHANNEL_PAGE_SIZE} 条，翻页不改已读）"
+        f"还有 {not_shown} 条未读没列出来，传 before={pending_cursor} 往前翻能看到"
+        f"（每页 {READ_CHANNEL_PAGE_SIZE} 条，翻页不改已读）。"
         if not_shown > 0 and (not_shown != prev_pending or called_this_turn)
         else None
     )
 
     out_lines = [
-        f"{target_sid} 最近 {len(display)} 条{comp_str}（本机时间，正序；已标记读过 id={new_read_up_to}） · {where_label}",
+        f"{target_sid} · {where_label}｜最近 {len(display)} 条{comp_str}（本机时间，从旧到新；已读到 id={new_read_up_to}）",
         *_render_rows(display, mentioned_set),
         _paging_footer(
             next_before=display_floor,
@@ -370,10 +361,10 @@ class ReadChannelTool(FunctionTool):
 
     name: str = "read_channel"
     description: str = (
-        "看某个外部会话（QQ群或私聊）的消息（也包括你自己在这个会话说过的话，行首 `（我）`）。"
-        "默认只给未读里点你的那些和它们之前十条（未读少于一屏则全给），看过的标记已读。"
-        "想看更早的记录就传 before 游标往回翻（每页 50 条，翻页不改已读）。"
-        "想接着说话请调用 send_message_to_user。"
+        "读某个 QQ 群或私聊的消息，包括你自己在那边说过的话（行首（我））。"
+        f"默认只给未读里叫了你的消息和每条之前 {READ_CHANNEL_MENTION_CONTEXT} 条，叫了你的行前面有 ▶；未读不到一屏就全给。读过的会标记已读。"
+        f"传 before 可以往前翻历史，每页 {READ_CHANNEL_PAGE_SIZE} 条，翻页不改已读。"
+        "要说话用 send_message_to_user。"
     )
     parameters: dict = Field(
         default_factory=lambda: {
@@ -381,20 +372,20 @@ class ReadChannelTool(FunctionTool):
             "properties": {
                 "sid": {
                     "type": "string",
-                    "description": "会话标识（即 UMO，形如 aiocqhttp:GroupMessage:群号，见上下文的外部会话清单）",
+                    "description": "会话的 sid，形如 aiocqhttp:GroupMessage:群号，在会话清单里。",
                 },
                 "before": {
                     "type": "integer",
                     "description": (
-                        f"可选翻页游标：取比该消息 id 更早的历史记录（从上一屏页脚抄）。"
-                        f"传了就进入翻页模式：一页 {READ_CHANNEL_PAGE_SIZE} 条、不改已读；不传则按默认未读模式读取。"
+                        "可选。翻页游标，从上一次结果末尾的提示里抄。"
+                        f"传了就读这个 id 之前的历史，每页 {READ_CHANNEL_PAGE_SIZE} 条，不改已读；不传就读未读。"
                     ),
                 },
                 "limit": {
                     "type": "integer",
                     "description": (
-                        f"这一屏最多返回几行（默认 {READ_CHANNEL_DEFAULT_LIMIT}，翻页默认 {READ_CHANNEL_PAGE_SIZE}，"
-                        f"上限 {READ_CHANNEL_MAX_LIMIT}）；你自己的发言也占行。"
+                        f"这次最多返回几条。默认 {READ_CHANNEL_DEFAULT_LIMIT}，翻页默认 {READ_CHANNEL_PAGE_SIZE}，"
+                        f"最多 {READ_CHANNEL_MAX_LIMIT}。你自己的发言也算条数。"
                     ),
                 },
             },

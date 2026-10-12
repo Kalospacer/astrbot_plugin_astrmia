@@ -30,11 +30,11 @@
     "hint": "群友连续发多条 @ 或提及消息时，等待几秒合并为一拍再唤醒主脑；设为 0 则每条立即唤醒。私聊与定时任务不等待。"
   },
   "light_provider_id": {
-    "description": "24字群话题概括使用的轻量模型 Provider",
+    "description": "群话题概括与心跳小结使用的轻量模型 Provider",
     "type": "string",
     "default": "",
     "_special": "select_provider",
-    "hint": "用于后台生成 24 字以内的『那边在聊：XXX』话题简报。建议选便宜快速的小模型；留空则回退当前默认聊天模型。"
+    "hint": "用于后台生成『那边在聊：XXX』话题简报，以及心跳醒来做过事后的短小结。建议选便宜快速的小模型；留空则回退当前默认聊天模型。"
   },
   "topic_min_unread": {
     "description": "后台自动概括群话题的未读条数门槛",
@@ -46,13 +46,13 @@
     "description": "同一群聊自动话题概括的最小冷却间隔（秒）",
     "type": "int",
     "default": 180,
-    "hint": "防止活跃水群频繁调用轻量模型概括话题。"
+    "hint": "防止活跃水群频繁调用轻量模型概括话题。按上一次实际尝试的时间计算，概括失败也要等冷却结束；被点名时不受冷却限制。"
   },
   "heartbeat_enabled": {
     "description": "启用 5~60 分钟连续概率呼吸心跳",
     "type": "bool",
     "default": true,
-    "hint": "没人说话时，按随安静时长递增的概率曲线（p = q^alpha）每分钟抽签自然醒来，查看未读信箱与今日待办，自主决定是否找人说话。"
+    "hint": "没人说话时，按随安静时长递增的概率曲线（p = q^alpha）每隔一个抽签间隔抽签一次自然醒来，查看未读信箱与今日待办，自主决定是否找人说话。需要先绑定全局主脑会话才会运行。"
   },
   "heartbeat_floor_min": {
     "description": "心跳安静下限 floor（分钟）",
@@ -73,9 +73,81 @@
     "hint": "期望平均多少分钟自然醒来一次（需介于 floor 与 ceil 之间，启动时自动通过 200 步二分法反解形状指数 alpha）。"
   },
   "intercept_direct_reply": {
-    "description": "拦截模型直出文本（开启后仅靠 send_message_to_user 对外发声）",
+    "description": "工具已发到当前窗口时收起末尾回复",
     "type": "bool",
     "default": false,
-    "hint": "危险/进阶开关（默认关闭）。开启后，模型直接输出的普通文字视为『屋里自言自语/内心活动』只记日志不发往 QQ，必须调用 send_message_to_user 工具才对外说话；关闭时保留普通直出回复（输出 [SILENT] 仍可保持沉默）。"
+    "hint": "开启后：本轮如果已经用 send_message_to_user 成功发到了唤醒她的这个窗口，之后的普通文字回复只记日志、不再重复发出；没发到这个窗口（或只发给了别的群/私聊）时，普通回复照常直接发出。关闭时普通回复始终直出。无论开关如何，单独输出 [SILENT] 都会保持沉默。"
+  },
+  "topic_options": {
+    "description": "话题概括",
+    "type": "object",
+    "items": {
+      "max_chars": {
+        "description": "话题最长字数",
+        "type": "int",
+        "default": 24,
+        "hint": "『那边在聊：XXX』话题简报的字数上限。"
+      },
+      "context_messages": {
+        "description": "概括参考的最近消息条数",
+        "type": "int",
+        "default": 25,
+        "hint": "每次概括时取该群最近多少条消息给轻量模型看。"
+      },
+      "line_max_chars": {
+        "description": "每条消息截取字数",
+        "type": "int",
+        "default": 120,
+        "hint": "交给轻量模型的每条消息最多保留多少字，太长的部分截掉。"
+      },
+      "timeout_sec": {
+        "description": "轻量模型超时（秒）",
+        "type": "int",
+        "default": 10,
+        "hint": "群话题概括与心跳小结共用的轻量模型调用超时。"
+      }
+    }
+  },
+  "wake_options": {
+    "description": "心跳唤醒",
+    "type": "object",
+    "items": {
+      "summary_max_chars": {
+        "description": "心跳小结最长字数",
+        "type": "int",
+        "default": 60,
+        "hint": "心跳/手动唤醒翻过信箱或发过消息后，用轻量模型写进主脑上下文的小结字数上限。小结失败时不写。"
+      },
+      "tick_sec": {
+        "description": "心跳抽签间隔（秒）",
+        "type": "int",
+        "default": 60,
+        "hint": "每隔多少秒抽一次签；修改后会自动重新计算概率曲线，保持目标平均间隔不变。"
+      },
+      "max_steps": {
+        "description": "单次唤醒最多推理步数",
+        "type": "int",
+        "default": 32,
+        "hint": "一次心跳/手动唤醒里主脑最多走多少步（一次模型回复算一步，一步里可能调用多个工具，所以不等于工具调用次数）。"
+      }
+    }
+  },
+  "display_options": {
+    "description": "清单显示",
+    "type": "object",
+    "items": {
+      "session_list_max": {
+        "description": "外部会话清单最多显示个数",
+        "type": "int",
+        "default": 8,
+        "hint": "每轮注入给主脑的外部会话清单，以及 /astrmia status 里最多列出多少个会话。"
+      },
+      "quote_preview_chars": {
+        "description": "引用消息预览字数",
+        "type": "int",
+        "default": 40,
+        "hint": "群消息里引用了别人的话时，记入信箱的引用预览保留多少字。"
+      }
+    }
   }
 }

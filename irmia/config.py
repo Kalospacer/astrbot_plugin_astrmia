@@ -41,6 +41,15 @@ class IrmiaConfig:
     heartbeat_ceil_min: int = 60
     heartbeat_target_mean_min: int = 15
     intercept_direct_reply: bool = False
+    topic_max_chars: int = 24
+    topic_context_messages: int = 25
+    topic_line_max_chars: int = 120
+    light_timeout_sec: int = 10
+    wake_summary_max_chars: int = 60
+    heartbeat_tick_sec: int = 60
+    wake_max_steps: int = 32
+    session_list_max: int = 8
+    quote_preview_chars: int = 40
 
 
 def parse_contacts_map(raw_list: Any) -> dict[str, str]:
@@ -103,6 +112,11 @@ def load_irmia_config(raw: dict[str, Any] | None) -> IrmiaConfig:
             min_value=minimum,
         )
 
+    def _group_int(group: str, key: str, default: int) -> int:
+        section = cfg.get(group)
+        value = section.get(key, default) if isinstance(section, dict) else default
+        return _coerce_int(value, default=default, min_value=1)
+
     raw_keywords = cfg.get("mention_keywords", [])
     keywords = (
         [str(w).strip() for w in raw_keywords if str(w).strip()]
@@ -124,10 +138,19 @@ def load_irmia_config(raw: dict[str, Any] | None) -> IrmiaConfig:
         group_batch_window_sec=_int("group_batch_window_sec", 3, minimum=0),
         light_provider_id=str(cfg.get("light_provider_id", "") or "").strip(),
         topic_min_unread=_int("topic_min_unread", 5, minimum=1),
-        topic_cooldown_sec=_int("topic_cooldown_sec", 180, minimum=10),
+        topic_cooldown_sec=_int("topic_cooldown_sec", 180),
         heartbeat_enabled=bool(cfg.get("heartbeat_enabled", True)),
         heartbeat_floor_min=floor_min,
         heartbeat_ceil_min=ceil_min,
         heartbeat_target_mean_min=target_mean,
         intercept_direct_reply=bool(cfg.get("intercept_direct_reply", False)),
+        topic_max_chars=_group_int("topic_options", "max_chars", 24),
+        topic_context_messages=_group_int("topic_options", "context_messages", 25),
+        topic_line_max_chars=_group_int("topic_options", "line_max_chars", 120),
+        light_timeout_sec=_group_int("topic_options", "timeout_sec", 10),
+        wake_summary_max_chars=_group_int("wake_options", "summary_max_chars", 60),
+        heartbeat_tick_sec=_group_int("wake_options", "tick_sec", 60),
+        wake_max_steps=_group_int("wake_options", "max_steps", 32),
+        session_list_max=_group_int("display_options", "session_list_max", 8),
+        quote_preview_chars=_group_int("display_options", "quote_preview_chars", 40),
     )

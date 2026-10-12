@@ -9,7 +9,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from irmia.read_channel_tool import SENT_CREDENTIAL_NOTE
 from irmia.runtime import IrmiaRuntime
 
 
@@ -44,6 +43,9 @@ class FakeResult:
         return self.text
 
     def is_model_result(self) -> bool:
+        return self.model_res
+
+    def is_llm_result(self) -> bool:
         return self.model_res
 
 
@@ -225,12 +227,12 @@ def test_runtime_end_to_end_flow(tmp_path: Path) -> None:
             prompt="清漪快来帮我看看这道题", image_urls=["http://example.com/a.jpg"]
         )
         await rt.on_llm_request(grp_mention, req)
-        # prompt 被替换为半遮面通知卡，原图被收起，conversation 切换到 master_cid_001，role 提升为 admin
+        # prompt 被替换为半遮面通知卡，原图被收起，conversation 切换到 master_cid_001，身份保持原生 member
         assert req.prompt == notice
         assert req.image_urls == []
         assert req.conversation.cid == "master_cid_001"
         assert req.contexts == [{"role": "user", "content": "主脑历史第一句"}]
-        assert grp_mention.role == "admin"
+        assert grp_mention.role == "member"
         assert len(req.extra_user_content_parts) == 1
         injected_text = req.extra_user_content_parts[0].text
         assert "外部会话" in injected_text
@@ -258,7 +260,7 @@ def test_runtime_end_to_end_flow(tmp_path: Path) -> None:
             {"messages": [{"type": "plain", "text": "来啦来啦，哪道题呀？"}]},
             t_res,
         )
-        assert SENT_CREDENTIAL_NOTE in t_res.content[0].text
+        assert grp_mention.get_extra("irmia_sent_current_session") is True
 
         # 6. 测试 [SILENT] 静默与 intercept_direct_reply 开关
         grp_mention._result = FakeResult(text="[SILENT]")

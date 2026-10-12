@@ -1,6 +1,6 @@
 name: astrbot_plugin_astrmia
 display_name: AstrMia
-desc: 将 I.R.M.I.A 的全局唯一主脑、三层未读信箱、24字群话题概括、半遮面点名通知、read_channel 防刷屏翻阅与 5~60 分钟连续概率呼吸心跳完整引入 AstrBot，并与 AstrHe、LivingMemory 无缝联动。
+desc: 将 I.R.M.I.A 的全局唯一主脑、三层未读信箱、群话题概括、半遮面点名通知、read_channel 防刷屏翻阅与 5~60 分钟连续概率呼吸心跳引入 AstrBot，并复用 AstrHe 的聊天账本与关系本。
 version: v0.1.0
 author: Kalo & Qingyi
 repo: https://github.com/Kalospacer/astrbot_plugin_astrmia

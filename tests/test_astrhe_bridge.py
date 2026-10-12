@@ -125,7 +125,7 @@ def test_astrhe_database_bridge(tmp_path: Path) -> None:
 
         # 紧接着再读一次（无新消息）：必须正常进入『没有新消息』分支，不会因为 #3 是 bot 消息而死锁
         out_again = await execute_read_channel(store=store, sid=umo, limit=20)
-        assert "没有新消息：你已经读到最新了" in out_again
+        assert "没有新消息，已经读到最新" in out_again
 
         # 随后群友在 astrhe.db 发来第 4 条新消息，未读数必须正常变为 1（绝不被吞）
         # 同时再模拟上一轮未读过的暂存 Bot 发言（ts=1700000045.0）排在新群友消息（ts=1700000050.0）之前

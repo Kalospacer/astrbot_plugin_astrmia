@@ -524,7 +524,7 @@ class IrmiaStore:
     async def update_topic(
         self, umo: str, topic: str, to_id: int, updated_at: float | None = None
     ) -> None:
-        """更新会话的 24 字话题概括。"""
+        """更新会话的话题概括。"""
         now_ts = updated_at if updated_at is not None else time.time()
         async with self._lock:
             conn = self._ensure_conn()

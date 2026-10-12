@@ -44,24 +44,15 @@ class AstrMiaPlugin(Star):
         """在 AstrHe (maxsize-3) 记账之后执行信箱分流、群聊攒批与半遮面通知装配。"""
         await self.runtime.on_incoming_event(event)
 
+    @filter.on_waiting_llm_request(priority=sys.maxsize - 4)
+    async def handle_waiting_llm_request(self, event: AstrMessageEvent) -> None:
+        """在核心读取历史前排队取得主脑锁，避免多个会话同时改写共享主脑历史。"""
+        await self.runtime.on_waiting_llm_request(event)
+
     @filter.on_llm_request(priority=sys.maxsize - 4)
     async def handle_llm_request(self, event: AstrMessageEvent, req: Any) -> None:
         """绑定全局主脑历史、替换群点名半遮面通知、注入此刻层与外部会话未读信箱清单。"""
         await self.runtime.on_llm_request(event, req)
-
-    @filter.on_agent_begin()
-    async def handle_agent_begin(
-        self, event: AstrMessageEvent, run_context: Any
-    ) -> None:
-        """记录主脑进入活跃运行轮次，防止心跳在对话途中重叠触发。"""
-        await self.runtime.on_agent_begin(event, run_context)
-
-    @filter.on_agent_done()
-    async def handle_agent_done(
-        self, event: AstrMessageEvent, run_context: Any, response: Any
-    ) -> None:
-        """标记主脑运行轮次结束。"""
-        await self.runtime.on_agent_done(event, run_context, response)
 
     @filter.on_llm_tool_respond()
     async def handle_tool_respond(
@@ -71,14 +62,14 @@ class AstrMiaPlugin(Star):
         tool_args: Any,
         tool_result: Any,
     ) -> None:
-        """监听 send_message_to_user：记入兜底账本并在回执中附带已送达凭据。"""
+        """监听 send_message_to_user：标记是否已发到当前窗口并记入兜底账本。"""
         await self.runtime.on_llm_tool_respond(
             event, tool, tool_args, tool_result
         )
 
     @filter.on_decorating_result(priority=sys.maxsize - 4)
     async def handle_decorating_result(self, event: AstrMessageEvent) -> None:
-        """处理 [SILENT] 沉默权标记与可选的 intercept_direct_reply（拦截直出文字作屋内自言自语）。"""
+        """处理 [SILENT] 沉默权标记与可选的 intercept_direct_reply（工具已发到当前窗口时收起末尾回复）。"""
         await self.runtime.on_decorating_result(event)
 
     @filter.after_message_sent(priority=sys.maxsize - 4)

@@ -65,6 +65,8 @@ def heartbeat_mean_ms(
 ) -> float:
     """用离散 PMF 求和计算单轮安静时长的解析期望值 E[T]（毫秒）。
 
+    抽签只发生在 tick 的整数倍时刻；tick 不整除 ceil 时，剩余概率落在第一个越过 ceil 的抽签时刻。
+
     Args:
         floor_ms: 安静下限（毫秒）。
         ceil_ms: 安静上限（毫秒）。
@@ -74,21 +76,17 @@ def heartbeat_mean_ms(
     Returns:
         期望安静时长（毫秒）。
     """
-    step = max(1000.0, float(tick_ms))
+    step = float(tick_ms)
     survival = 1.0
     expected = 0.0
     t = step
-    max_t = max(float(ceil_ms), float(floor_ms) + step)
-    while t <= max_t + 0.5:
-        p = 1.0 if t >= max_t else heartbeat_probability(t, floor_ms, ceil_ms, alpha)
-        hit = survival * p
-        expected += t * hit
+    while True:
+        p = heartbeat_probability(t, floor_ms, ceil_ms, alpha)
+        expected += t * survival * p
         survival *= 1.0 - p
-        if survival <= 1e-12:
+        if p >= 1.0 or survival <= 1e-12:
             break
         t += step
-    if survival > 0:
-        expected += max_t * survival
     return expected
 
 
@@ -192,7 +190,7 @@ class HeartbeatEngine:
         )
         floor_ms = float(f_min * 60_000)
         ceil_ms = float(c_min * 60_000)
-        tick_ms = float(max(5, tick_sec) * 1000)
+        tick_ms = float(tick_sec * 1000)
         target_ms = float(t_min * 60_000)
         if (
             floor_ms == self.floor_ms
