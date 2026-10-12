@@ -1,11 +1,14 @@
 <div align="center">
-  <img width="100%" src="https://erika.snowy.moe/v1/banner/kalospacer/astrbot_plugin_astrmia/grokbot.webp?theme=light&accent=auto&title=AstrMia&description=%E5%85%A8%E5%B1%80%E4%B8%BB%E8%84%91%E3%80%81%E4%B8%89%E5%B1%82%E6%9C%AA%E8%AF%BB%E4%BF%A1%E7%AE%B1%E4%B8%8E%E8%BF%9E%E7%BB%AD%E6%A6%82%E7%8E%87%E5%91%BC%E5%90%B8%E5%BF%83%E8%B7%B3" alt="AstrMia Banner" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/banner-dark.webp" />
+    <img width="100%" src="assets/banner-light.webp" alt="AstrMia Banner" />
+  </picture>
   <h1>AstrBot Plugin AstrMia</h1>
   <i>—— 全局主脑与未读信箱 ——</i>
 </div>
 
 <p align="center">
-  <strong>将 I.R.M.I.A 的全局唯一主脑、三层未读信箱与呼吸心跳引入 AstrBot</strong>
+  <strong>为 AstrBot 引入 I.R.M.I.A 式 Harness 系统</strong>
 </p>
 
 ---
