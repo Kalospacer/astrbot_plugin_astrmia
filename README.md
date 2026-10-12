@@ -1,4 +1,14 @@
-# AstrMia (`astrbot_plugin_astrmia`)
+<div align="center">
+  <img width="100%" src="https://erika.snowy.moe/v1/banner/kalospacer/astrbot_plugin_astrmia/grokbot.webp?theme=light&accent=auto&title=AstrMia&description=%E5%85%A8%E5%B1%80%E4%B8%BB%E8%84%91%E3%80%81%E4%B8%89%E5%B1%82%E6%9C%AA%E8%AF%BB%E4%BF%A1%E7%AE%B1%E4%B8%8E%E8%BF%9E%E7%BB%AD%E6%A6%82%E7%8E%87%E5%91%BC%E5%90%B8%E5%BF%83%E8%B7%B3" alt="AstrMia Banner" />
+  <h1>AstrBot Plugin AstrMia</h1>
+  <i>—— 全局主脑与未读信箱 ——</i>
+</div>
+
+<p align="center">
+  <strong>将 I.R.M.I.A 的全局唯一主脑、三层未读信箱与呼吸心跳引入 AstrBot</strong>
+</p>
+
+---
 
 将 **I.R.M.I.A** 的「全局唯一主脑 + 手边三层未读信箱 + 群话题概括 + 群点名半遮面通知 + `read_channel` 防刷屏翻阅 + 5~60分钟连续概率呼吸心跳」引入 AstrBot，并复用 **AstrHe** 的聊天账本与关系本。
 
