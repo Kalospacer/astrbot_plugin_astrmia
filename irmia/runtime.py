@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import re
 import time
@@ -200,9 +201,13 @@ class IrmiaRuntime:
         self._brain_lock = asyncio.Lock()
         self._brain_owner: asyncio.Task[Any] | None = None
         self._last_active_event: Any = None
+        self._current_chat_event: contextvars.ContextVar[Any] = (
+            contextvars.ContextVar("irmia_current_chat_event", default=None)
+        )
         self._heartbeat_task: asyncio.Task[None] | None = None
         self._bg_tasks: set[asyncio.Task[Any]] = set()
         self._tools_registered = False
+        self._install_send_message_patch()
 
     def cfg(self) -> IrmiaConfig:
         """动态读取当前最新配置并按需同步心跳参数。"""
@@ -235,6 +240,7 @@ class IrmiaRuntime:
 
     async def initialize(self) -> None:
         """启动存储、注册 read_channel 工具并开启呼吸心跳循环。"""
+        self._install_send_message_patch()
         await self.store.open()
         self._auto_master_umo = (
             await self.store.get_kv("auto_master_umo", "")
@@ -249,6 +255,7 @@ class IrmiaRuntime:
 
     async def terminate(self) -> None:
         """停止心跳循环、等待后台任务收尾并关闭存储。"""
+        self._uninstall_send_message_patch()
         if self._heartbeat_task is not None:
             self._heartbeat_task.cancel()
             try:
@@ -532,6 +539,12 @@ class IrmiaRuntime:
         """在核心读取历史之前取得主脑锁，处理任务结束（历史已保存）后自动释放。"""
         if is_internal_silent_event(event) or not self.cfg().enabled:
             return
+        self._current_chat_event.set(event)
+        task = asyncio.current_task()
+        if task is not None:
+            task.add_done_callback(
+                lambda _t, ev=event: self._flush_unconsumed_buffered_chain(ev)
+            )
         if not await self.resolve_master_umo():
             return
         if await self._acquire_brain():
@@ -553,6 +566,7 @@ class IrmiaRuntime:
         if hasattr(event, "set_extra"):
             event.set_extra("irmia_repeat_reads", {})
         self._last_active_event = event
+        self._current_chat_event.set(event)
         is_wake = bool(event.get_extra("irmia_wake")) if hasattr(event, "get_extra") else False
 
         # 1. 全局唯一主脑历史绑定（排队后重读最新存储；内部唤醒已在持锁入口绑定过，不覆盖核心装配的上下文）
@@ -710,13 +724,63 @@ class IrmiaRuntime:
         except Exception as exc:
             self.logger.debug(f"[IRMIA] 处理 send_message_to_user 回执异常: {exc}")
 
-    # ---------------- 钩子 5：发送前拦截（沉默权/当前窗口已发声）与发送后记账 ----------------
+    # ---------------- 钩子 5：发送前拦截（沉默权/工具回流/当前窗口已发声）与发送后记账 ----------------
+
+    def _install_send_message_patch(self) -> None:
+        if self.context is None or not hasattr(self.context, "send_message"):
+            return
+        if getattr(self.context, "_irmia_send_patched", False):
+            return
+        original = self.context.send_message
+        self._original_send_message = original
+        setattr(self.context, "_irmia_send_patched", True)
+
+        async def patched_send_message(session, message_chain):
+            if self.cfg().enabled and self.cfg().intercept_direct_reply:
+                ev = self._current_chat_event.get()
+                if ev is not None and not is_internal_silent_event(ev):
+                    ev_umo = str(getattr(ev, "unified_msg_origin", "") or "").strip()
+                    if ev_umo and str(session) == ev_umo and not ev.get_extra("irmia_in_decorating"):
+                        chain = getattr(message_chain, "chain", None)
+                        if chain:
+                            buffered = ev.get_extra("irmia_buffered_tool_chain", [])
+                            if not isinstance(buffered, list):
+                                buffered = []
+                            buffered.extend(chain)
+                            ev.set_extra("irmia_buffered_tool_chain", buffered)
+                            ev.set_extra("irmia_sent_current_session", True)
+                            return True
+            return await original(session, message_chain)
+
+        self.context.send_message = patched_send_message
+
+    def _uninstall_send_message_patch(self) -> None:
+        if self.context is not None and getattr(self.context, "_irmia_send_patched", False):
+            if hasattr(self, "_original_send_message"):
+                self.context.send_message = self._original_send_message
+            setattr(self.context, "_irmia_send_patched", False)
+
+    def _flush_unconsumed_buffered_chain(self, event: Any) -> None:
+        """若本轮未进入 on_decorating_result（如模型末步无文本输出），把暂存链补发出去。"""
+        if not hasattr(event, "get_extra"):
+            return
+        buffered = event.get_extra("irmia_buffered_tool_chain")
+        if not isinstance(buffered, list) or not buffered:
+            return
+        event.set_extra("irmia_buffered_tool_chain", [])
+        event.set_extra("irmia_in_decorating", True)
+        umo = str(getattr(event, "unified_msg_origin", "") or "").strip()
+        if not umo or self.context is None or not hasattr(self.context, "send_message"):
+            return
+        mc = MessageChain() if MessageChain is not None else SimpleNamespace(chain=[])
+        mc.chain = list(buffered)
+        self._spawn_bg(self.context.send_message(umo, mc))
 
     async def on_decorating_result(self, event: Any) -> None:
-        """处理 [SILENT] 静默标记，以及工具已发到当前窗口后收起普通模型文字（intercept_direct_reply）。
+        """处理 [SILENT] 静默标记，以及工具回复当前窗口时的回流替换（intercept_direct_reply）。
 
-        只替换待发送的 chain 为新空列表：模型结果对象可能与发送结果共用同一个列表，
-        原地清空会连带清掉模型结果，导致核心跳过这一轮的历史保存。
+        若模型在本轮通过 send_message_to_user 发往当前唤醒窗口，暂存的真实回复链会在此处
+        替换掉模型末尾的自言自语总结，继续交给后续装饰钩子（表情包替换、分段发送）。
         """
         if is_internal_silent_event(event):
             return
@@ -725,6 +789,8 @@ class IrmiaRuntime:
             return
         if hasattr(event, "get_extra") and event.get_extra("handlers_parsed_params"):
             return
+        if hasattr(event, "set_extra"):
+            event.set_extra("irmia_in_decorating", True)
 
         result = getattr(event, "get_result", lambda: None)()
         if result is None or not getattr(result, "chain", None):
@@ -737,17 +803,29 @@ class IrmiaRuntime:
         except Exception:
             plain_text = ""
 
+        if cfg.intercept_direct_reply and event.get_extra("irmia_sent_current_session"):
+            if hasattr(event, "set_extra"):
+                event.set_extra("_send_message_to_user_current_session_plain_texts", [])
+            buffered = event.get_extra("irmia_buffered_tool_chain")
+            if isinstance(buffered, list) and buffered:
+                if plain_text:
+                    self.logger.info(
+                        f"[IRMIA 工具回复回流流水线，收起末尾文字] {plain_text}"
+                    )
+                result.chain = list(buffered)
+                event.set_extra("irmia_buffered_tool_chain", [])
+                return
+            if plain_text:
+                self.logger.info(f"[IRMIA 已用工具回复当前窗口，收起末尾文字] {plain_text}")
+            result.chain = []
+            return
+
         if plain_text == "[SILENT]":
             self.logger.info(
                 f"[IRMIA 沉默] 主脑选择保持沉默 ({getattr(event, 'unified_msg_origin', '')})"
             )
             result.chain = []
             return
-
-        if cfg.intercept_direct_reply and event.get_extra("irmia_sent_current_session"):
-            if plain_text:
-                self.logger.info(f"[IRMIA 已用工具回复当前窗口，收起末尾文字] {plain_text}")
-            result.chain = []
 
     async def on_after_message_sent(self, event: Any) -> None:
         """当直出回复实际发送到平台后，确保兜底账本中也记录了这句（我）的发言。"""

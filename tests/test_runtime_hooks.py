@@ -136,12 +136,17 @@ class FakeContext:
     def __init__(self) -> None:
         self.conversation_manager = FakeConvManager()
         self.registered_tools: list[Any] = []
+        self.sent_messages: list[tuple[str, Any]] = []
 
     def get_config(self, umo: str | None = None) -> dict[str, Any]:
         return {"timezone": "Asia/Shanghai", "admins_id": ["114514"]}
 
     def add_llm_tools(self, *tools: Any) -> None:
         self.registered_tools.extend(tools)
+
+    async def send_message(self, session: Any, message_chain: Any) -> bool:
+        self.sent_messages.append((str(session), message_chain))
+        return True
 
 
 @dataclass
@@ -271,6 +276,29 @@ def test_runtime_end_to_end_flow(tmp_path: Path) -> None:
         grp_mention._result = FakeResult(text="我在屋里自言自语一句")
         await rt.on_decorating_result(grp_mention)
         assert grp_mention._result.chain == []
+
+        # 6b. 测试当前会话 send_message_to_user 暂存回流到 result.chain（供后续表情与分段插件处理）
+        grp_mention2 = FakeEvent(
+            grp_umo,
+            "清漪在吗",
+            private=False,
+            at_bot=True,
+            sender_id="114514",
+            sender_name="老哥",
+        )
+        req2 = FakeReq(prompt="清漪在吗")
+        await rt.on_llm_request(grp_mention2, req2)
+        from types import SimpleNamespace as _SNS
+        tool_mc = _SNS(chain=["真实回复第一句。真实回复第二句。"])
+        sent_ok = await ctx.send_message(grp_umo, tool_mc)
+        assert sent_ok is True
+        assert ctx.sent_messages == []  # 尚未裸发，已暂存等流水线装饰
+        grp_mention2._result = FakeResult(text="我回了老哥一句。")
+        await rt.on_decorating_result(grp_mention2)
+        assert grp_mention2._result.chain == ["真实回复第一句。真实回复第二句。"]
+        # 装饰阶段内部（如 splitter 切分前段）再次调用 send_message 时直通底层
+        await ctx.send_message(grp_umo, _SNS(chain=["分段1"]))
+        assert len(ctx.sent_messages) == 1
 
         status_txt = await rt.status_report()
         assert "aiocqhttp:FriendMessage:114514" in status_txt
