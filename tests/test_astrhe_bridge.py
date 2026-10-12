@@ -87,6 +87,9 @@ def test_astrhe_database_bridge(tmp_path: Path) -> None:
         # 验证从 AstrHe persons 表解析别名
         resolved_name = store.resolve_person_name("114514", "路人甲网名")
         assert resolved_name == "笨蛋老哥"
+        # 验证 QQ 炫彩昵称 protobuf 二进制头与双向控制符被剥离成干净名字
+        noisy_raw = "\n\x0c\n\n%ĀĀ\x07Û\n\x0b\x12\t彼岸⁧\x10\x00"
+        assert store.resolve_person_name("2480866457", noisy_raw, "") == "彼岸"
 
         # 验证外部会话清单聚合（自动排除已撤回消息，未读数只算非 bot 消息 = 1 条）
         sessions = await store.list_sessions()

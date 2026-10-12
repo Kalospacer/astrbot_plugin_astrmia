@@ -4,11 +4,30 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import sqlite3
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+_PROTO_PREFIX_RE = re.compile(r"^[\s\S]*[\x00-\x1f]")
+_CTRL_CHARS_RE = re.compile(
+    r"[\x00-\x1f\x7f-\x9f​-‏‪-‮⁠-⁯﻿]+"
+)
+
+
+def sanitize_display_name(raw: str) -> str:
+    """剥离 QQ 协议炫彩昵称残留的二进制头与不可见控制字符。"""
+    s = str(raw or "")
+    if not s:
+        return ""
+    s = re.sub(r"[\x00-\x1f⁠-⁯]+$", "", s)
+    if any(ord(ch) < 32 for ch in s):
+        s = _PROTO_PREFIX_RE.sub("", s)
+    s = _CTRL_CHARS_RE.sub("", s)
+    return " ".join(s.split())
+
 
 IRMIA_SCHEMA = """
 CREATE TABLE IF NOT EXISTS session_state (
@@ -274,10 +293,10 @@ class IrmiaStore:
         alias = self.get_astrhe_person_alias(sid)
         if alias:
             return alias
-        card = str(sender_card or "").strip()
+        card = sanitize_display_name(sender_card)
         if card:
             return card
-        name = str(sender_name or "").strip()
+        name = sanitize_display_name(sender_name)
         if name:
             return name
         if sid:
