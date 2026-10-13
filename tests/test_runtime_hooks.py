@@ -214,7 +214,7 @@ def test_runtime_end_to_end_flow(tmp_path: Path) -> None:
         await rt.on_incoming_event(grp_plain)
         assert grp_plain.stopped is True
 
-        # 4. 群聊关键词提及（"清漪"）：不拦截，生成半遮面通知卡，并在 on_llm_request 中切换主脑历史与替换 prompt
+        # 4. 群聊关键词提及（"清漪"）：不拦截，先存通知元信息，在 on_llm_request 中生成内嵌卡片并切换主脑历史
         grp_mention = FakeEvent(
             grp_umo,
             "清漪快来帮我看看这道题",
@@ -223,17 +223,23 @@ def test_runtime_end_to_end_flow(tmp_path: Path) -> None:
             sender_id="114514",
             sender_name="老哥",
         )
+        grp_mention.message_obj.message_id = "msg_mention"
         await rt.on_incoming_event(grp_mention)
         assert grp_mention.stopped is False
         assert grp_mention.is_wake is True
-        notice = grp_mention.get_extra("irmia_mention_notice")
-        assert isinstance(notice, str) and "提到了你" in notice
+        assert grp_mention.get_extra("irmia_mention_meta")["caller_name"] == "哥哥"
+        assert grp_mention.get_extra("irmia_mention_notice") is None
 
         req = FakeReq(
             prompt="清漪快来帮我看看这道题", image_urls=["http://example.com/a.jpg"]
         )
         await rt.on_llm_request(grp_mention, req)
-        # prompt 被替换为半遮面通知卡，原图被收起，conversation 切换到 master_cid_001，身份保持原生 member
+        # prompt 被替换为内嵌通知卡，原图被收起，conversation 切换到 master_cid_001，身份保持原生 member
+        notice = grp_mention.get_extra("irmia_mention_notice")
+        assert isinstance(notice, str) and "提到了你" in notice
+        assert "清漪快来帮我看看这道题" in notice
+        assert "标记已读" in notice
+        assert grp_mention.get_extra("irmia_repeat_reads") == {}
         assert req.prompt == notice
         assert req.image_urls == []
         assert req.conversation.cid == "master_cid_001"

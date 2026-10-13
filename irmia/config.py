@@ -33,6 +33,8 @@ class IrmiaConfig:
     mention_keywords: list[str] = field(default_factory=list)
     contacts_map: dict[str, str] = field(default_factory=dict)
     group_batch_window_sec: int = 3
+    mention_inline_enabled: bool = True
+    mention_inline_limit: int = 20
     light_provider_id: str = ""
     topic_min_unread: int = 5
     topic_cooldown_sec: int = 180
@@ -185,6 +187,8 @@ def load_irmia_config(raw: dict[str, Any] | None) -> IrmiaConfig:
         mention_keywords=keywords,
         contacts_map=parse_contacts_map(cfg.get("contacts_map", [])),
         group_batch_window_sec=_int("group_batch_window_sec", 3, minimum=0),
+        mention_inline_enabled=bool(cfg.get("mention_inline_enabled", True)),
+        mention_inline_limit=_int("mention_inline_limit", 20, minimum=1),
         light_provider_id=str(cfg.get("light_provider_id", "") or "").strip(),
         topic_min_unread=_int("topic_min_unread", 5, minimum=1),
         topic_cooldown_sec=_int("topic_cooldown_sec", 180),

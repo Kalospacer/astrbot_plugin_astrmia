@@ -15,6 +15,7 @@ from typing import Any
 from .config import IrmiaConfig, is_in_quiet_window, load_irmia_config
 from .heartbeat import HeartbeatEngine, HeartbeatFiring
 from .inbox import GroupBatcher, evaluate_channel_message
+from .mention import build_mention_notice
 from .read_channel_tool import ReadChannelTool, execute_read_channel
 from .read_image_tool import READ_IMAGE_DESCRIPTION, ReadImageTool, execute_read_image
 from .render import (
@@ -23,7 +24,6 @@ from .render import (
     format_clock_line,
     format_short_time,
     render_heartbeat_prompt,
-    render_mention_notice,
     render_session_list,
     resolve_tz,
 )
@@ -210,9 +210,10 @@ class IrmiaRuntime:
 
         self._bot_self_ids: set[str] = set()
         self._auto_master_umo: str | None = None
-        # 主脑锁：所有共享主脑历史的请求（各源会话 + 心跳/手动唤醒）在读历史前排队，保存后释放
+        # 主脑锁：聊天从读历史持有到任务结束；唤醒思考不持锁，仅小结重读与写回时排队
         self._brain_lock = asyncio.Lock()
         self._brain_owner: asyncio.Task[Any] | None = None
+        self._wake_running = False
         self._last_active_event: Any = None
         self._current_chat_event: contextvars.ContextVar[Any] = (
             contextvars.ContextVar("irmia_current_chat_event", default=None)
@@ -358,7 +359,9 @@ class IrmiaRuntime:
         called_sid = None
         repeat_reads = None
         if ev is not None and hasattr(ev, "get_extra"):
-            called_sid = ev.get_extra("irmia_called_sid")
+            # 内嵌通知已读过本轮叫醒群，工具不再兜底重复展示最近消息。
+            if not ev.get_extra("irmia_mention_inlined"):
+                called_sid = ev.get_extra("irmia_called_sid")
             repeat_reads = ev.get_extra("irmia_repeat_reads")
 
         return await execute_read_channel(
@@ -566,15 +569,12 @@ class IrmiaRuntime:
 
         st = await self.store.get_session_state(umo)
 
-        # 不在这里等话题概括：那一步要调一次小模型，点名后要等几秒到几十秒才发得出通知卡。
-        # 现在的做法是先拿上一次缓存的话题立刻拼卡，概括扔后台跑，跑完更新缓存给下次用。
+        # 不在这里等话题概括：先保存上一次缓存的话题，概括扔后台跑，跑完给下次用。
+        # 完整通知卡等聊天回合取得主脑锁后再生成，避免排队期间的已读水位变化。
         cached_topic = str(st.get("topic", "") or "")
         self._spawn_bg(
             self.topic_summarizer.maybe_summarize(umo, cfg, force_for_mention=True)
         )
-
-        read_up_to_id = int(st.get("read_up_to_id", 0) or 0)
-        unread_cnt = self.store.count_unread(umo, read_up_to_id)
 
         where_name = self.store.resolve_session_name(
             umo,
@@ -590,22 +590,22 @@ class IrmiaRuntime:
             now_ts, self.tz_name(), always_hm_only=True
         )
 
-        notice = render_mention_notice(
-            umo=umo,
-            where_name=where_name,
-            caller_name=caller_name,
-            is_at=decision.is_platform_at,
-            at_label=at_label,
-            unread=unread_cnt,
-            topic=cached_topic,
+        event.set_extra(
+            "irmia_mention_meta",
+            {
+                "where_name": where_name,
+                "caller_name": caller_name,
+                "is_at": decision.is_platform_at,
+                "at_label": at_label,
+                "topic": cached_topic,
+            },
         )
-        event.set_extra("irmia_mention_notice", notice)
         event.set_extra("irmia_called_sid", umo)
 
     # ---------------- 钩子 2：等待 LLM 请求（主脑排队） ----------------
 
     async def on_waiting_llm_request(self, event: Any) -> None:
-        """在核心读取历史之前取得主脑锁，处理任务结束（历史已保存）后自动释放。"""
+        """聊天在核心读历史前取得主脑锁，持有到保存历史后的任务结束；唤醒只在小结写回时排队。"""
         if is_internal_silent_event(event) or not self.cfg().enabled:
             return
         self._current_chat_event.set(event)
@@ -636,22 +636,34 @@ class IrmiaRuntime:
             event.set_extra("irmia_repeat_reads", {})
             event.set_extra("irmia_final_llm_resp", False)
             event.set_extra("irmia_in_decorating", False)
-        self._last_active_event = event
-        self._current_chat_event.set(event)
         is_wake = bool(event.get_extra("irmia_wake")) if hasattr(event, "get_extra") else False
+        if not is_wake:
+            self._last_active_event = event
+        self._current_chat_event.set(event)
 
-        # 1. 全局唯一主脑历史绑定（排队后重读最新存储；内部唤醒已在持锁入口绑定过，不覆盖核心装配的上下文）
+        # 1. 全局唯一主脑历史绑定（聊天排队后重读最新存储；内部唤醒自行绑定旧历史供思考，不在此覆盖）
         master_umo = await self.resolve_master_umo()
         if master_umo and not is_wake:
             await self._bind_master_conversation(master_umo, req)
 
-        # 2. 群聊点名 -> 替换为半遮面通知卡（同时清理原群聊消息附带的引用/图片/音频块）
-        mention_notice = (
-            event.get_extra("irmia_mention_notice")
+        # 2. 持聊天回合的主脑锁后生成点名卡片，同时清理原消息的引用/图片/音频块
+        mention_meta = (
+            event.get_extra("irmia_mention_meta")
             if hasattr(event, "get_extra")
             else None
         )
-        if isinstance(mention_notice, str) and mention_notice.strip():
+        if isinstance(mention_meta, dict):
+            mention_notice = await build_mention_notice(
+                store=self.store,
+                sid=event.get_extra("irmia_called_sid"),
+                meta=mention_meta,
+                cfg=cfg,
+                bot_self_ids=self._bot_self_ids,
+                tz_name=self.tz_name(),
+                captioner=self.captioner,
+            )
+            event.set_extra("irmia_mention_notice", mention_notice)
+            event.set_extra("irmia_mention_inlined", cfg.mention_inline_enabled)
             req.prompt = mention_notice
             if isinstance(getattr(req, "image_urls", None), list):
                 req.image_urls.clear()
@@ -676,7 +688,11 @@ class IrmiaRuntime:
                 req.prompt = f"[私聊 · {who} · sid {umo}]\n{req.prompt or ''}"
 
         # 3. 静态 SELF_BRIEF 幂等放入 system_prompt（保护前缀缓存），动态此刻层与工作目录说明放入 extra_user_content_parts
-        self_brief = build_self_brief(cfg.intercept_direct_reply, cfg.topic_max_chars)
+        self_brief = build_self_brief(
+            cfg.intercept_direct_reply,
+            cfg.topic_max_chars,
+            mention_inline=cfg.mention_inline_enabled,
+        )
         workspace_note = ""
         if hasattr(req, "system_prompt"):
             sys_p = str(getattr(req, "system_prompt", "") or "")
@@ -1011,8 +1027,8 @@ class IrmiaRuntime:
         await self._maybe_cleanup_vision(cfg)
         if not cfg.heartbeat_enabled:
             return
-        # 正在和人聊（主脑锁被占用）或尚未绑定主脑时跳过，不推进抽签周期
-        if self._brain_lock.locked() or not await self.resolve_master_umo():
+        # 正在和人聊、已有唤醒进行中或尚未绑定主脑时跳过，不推进抽签周期
+        if self._brain_lock.locked() or self._wake_running or not await self.resolve_master_umo():
             return
 
         # 夜间静默窗口：窗口内先确保心率归零一次，然后整拍跳过，不抽签
@@ -1048,16 +1064,17 @@ class IrmiaRuntime:
         firing: HeartbeatFiring | None = None,
         manual_note: str | None = None,
     ) -> str:
-        """持主脑锁发起一次静默唤醒 turn（心跳或手动 /astrmia wake）。"""
+        """发起静默唤醒：思考与聊天并行，仅末尾小结写回取锁、排在聊天之后。"""
         master_umo = await self.resolve_master_umo()
         if not master_umo:
             return "还没有绑定全局主脑会话（管理员先私聊一次，或在配置里填写 master_umo），本次不唤醒。"
-        owned = await self._acquire_brain()
+        if self._wake_running:
+            return "上一次唤醒还没结束，这次先不叫醒。"
+        self._wake_running = True
         try:
             return await self._run_wake_turn(master_umo, firing, manual_note)
         finally:
-            if owned:
-                self._release_brain()
+            self._wake_running = False
 
     async def _run_wake_turn(
         self,
@@ -1065,7 +1082,7 @@ class IrmiaRuntime:
         firing: HeartbeatFiring | None,
         manual_note: str | None,
     ) -> str:
-        """复用 AstrBot 原生 build_main_agent 链路跑一拍唤醒，做过事则把轻量小结追加进主脑历史。"""
+        """不持主脑锁跑原生 Agent 唤醒，做过事则在末尾排队写入轻量小结。"""
         from astrbot.core.agent.tool import ToolSet
         from astrbot.core.astr_main_agent import (
             MainAgentBuildConfig,
@@ -1190,7 +1207,7 @@ class IrmiaRuntime:
         reply_text: str,
         cfg: IrmiaConfig,
     ) -> None:
-        """用轻量模型把本轮唤醒压成短小结，重读最新主脑历史后追加到末尾；失败只记日志、不写兜底。"""
+        """锁外生成轻量小结，锁内重读最新主脑历史并追加；生成失败只记日志。"""
         from astrbot.core.utils.history_saver import persist_agent_history
 
         if req.conversation is None:
@@ -1215,15 +1232,16 @@ class IrmiaRuntime:
         if not summary:
             return
         conv_mgr = self.context.conversation_manager
-        req.conversation = await conv_mgr.get_conversation(
-            master_umo, req.conversation.cid
-        )
-        await persist_agent_history(
-            conv_mgr,
-            event=wake_event,
-            req=req,
-            summary_note=f"[IRMIA Wake] {summary}",
-        )
+        async with self._brain_lock:
+            req.conversation = await conv_mgr.get_conversation(
+                master_umo, req.conversation.cid
+            )
+            await persist_agent_history(
+                conv_mgr,
+                event=wake_event,
+                req=req,
+                summary_note=f"[IRMIA Wake] {summary}",
+            )
         self.logger.info(f"[IRMIA 唤醒小结] {summary}")
 
     # ---------------- 状态诊断 ----------------

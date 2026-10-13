@@ -29,6 +29,18 @@
     "default": 3,
     "hint": "群友连续发多条 @ 或提及消息时，等待几秒合并为一拍再唤醒主脑；设为 0 则每条立即唤醒。私聊与定时任务不等待。"
   },
+  "mention_inline_enabled": {
+    "description": "群点名通知直接附上消息与前后文",
+    "type": "bool",
+    "default": true,
+    "hint": "通知里直接附上 read_channel 默认精选的消息并标记已读，省掉一次读群调用；觉得不够仍可用 before 往前翻。图片只用已有描述缓存，不等待识别。关闭后恢复先通知、再自行读群的旧行为。"
+  },
+  "mention_inline_limit": {
+    "description": "群点名通知最多附带的消息条数",
+    "type": "int",
+    "default": 20,
+    "hint": "默认 20 条，沿用 read_channel 的精选规则与 100 条上限，机器人自己的发言也计入条数。"
+  },
   "light_provider_id": {
     "description": "群话题概括与心跳小结使用的轻量模型 Provider",
     "type": "string",

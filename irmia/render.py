@@ -77,12 +77,17 @@ def format_clock_line(now_ts: float, tz_name: str = "Asia/Shanghai") -> str:
     )
 
 
-def build_self_brief(intercept_direct_reply: bool = False, topic_max_chars: int = 24) -> str:
+def build_self_brief(
+    intercept_direct_reply: bool = False,
+    topic_max_chars: int = 24,
+    mention_inline: bool = True,
+) -> str:
     """生成注入给主脑的 IRMIA 静态装置自述说明（放入 system_prompt 稳定前缀以保护 Prompt Cache）。
 
     Args:
         intercept_direct_reply: 是否开启了『工具已发到当前窗口时收起末尾回复』开关。
         topic_max_chars: 信箱清单里话题简报的字数上限。
+        mention_inline: 群点名通知是否已内嵌消息与前后文。
 
     Returns:
         装置自述文本块。
@@ -109,7 +114,9 @@ def build_self_brief(intercept_direct_reply: bool = False, topic_max_chars: int 
             "谁需要回：",
             "- 管理员私聊你，基本都要回。",
             "- 其他人和群里的消息你看得到，但不欠谁回复。和你无关或者不想理，可以不回。",
-            "- 群里被 @ 或被叫到名字，只说明有人在叫你。先用 read_channel 看前后在聊什么，再决定接不接。",
+            "- 群里被 @ 或被叫到名字，通知里已经附上了叫你的那几句和前后文，看完直接决定接不接；觉得不够再用 read_channel 往前翻。"
+            if mention_inline
+            else "- 群里被 @ 或被叫到名字，只说明有人在叫你。先用 read_channel 看前后在聊什么，再决定接不接。",
             "",
             "群消息：",
             f"- 群里没叫你的消息不会叫醒你，只记成未读。会话清单里能看到未读数和一句 {topic_max_chars} 字以内的话题。",
@@ -179,6 +186,30 @@ def render_mention_notice(
     return (
         f"{stamp}{where_name} 里有人{called}{who}，那边一共有 {unread} 条未读。{talking}"
         f"要看就用 read_channel(sid={umo})：只想看叫你的那几句就把 limit 调小，想全看就调大。回不回你自己定。"
+    )
+
+
+def render_mention_notice_with_digest(
+    *,
+    umo: str,
+    where_name: str,
+    caller_name: str,
+    is_at: bool,
+    at_label: str,
+    unread: int,
+    topic: str,
+    digest: str,
+) -> str:
+    """生成已附读群结果的点名通知，保留消息编号与翻页指路。"""
+    called = "@了你" if is_at else "提到了你"
+    who = f"（是 {caller_name}）" if caller_name and caller_name != where_name else ""
+    stamp = f"{at_label}，" if at_label else ""
+    talking = f"那边在聊：{topic.strip()}。" if topic and topic.strip() else ""
+    return (
+        f"{stamp}{where_name} 里有人{called}{who}，那边一共有 {unread} 条未读。{talking}\n"
+        f"下面就是刚才叫你的消息和前后文，已经帮你读过了（标记已读），不用再 read_channel 这个群（sid={umo}）：\n"
+        f"{digest}\n"
+        "想往前翻更早的，照上面的提示传 before 用 read_channel。回不回你自己定。"
     )
 
 
