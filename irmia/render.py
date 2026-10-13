@@ -162,6 +162,20 @@ def render_session_list(
     )
 
 
+def _mention_head(
+    where_name: str, caller_name: str, is_at: bool, at_label: str
+) -> str:
+    """点名通知的开头：几点、在哪、谁叫了你。"""
+    called = "@了你" if is_at else "提到了你"
+    who = f"（是 {caller_name}）" if caller_name and caller_name != where_name else ""
+    stamp = f"{at_label}，" if at_label else ""
+    return f"{stamp}{where_name} 里有人{called}{who}"
+
+
+def _talking(topic: str) -> str:
+    return f"那边在聊：{topic.strip()}。" if topic and topic.strip() else ""
+
+
 def render_mention_notice(
     *,
     umo: str,
@@ -173,18 +187,16 @@ def render_mention_notice(
     topic: str,
 ) -> str:
     """生成群聊被 @ 或被提及时的点名通知（复刻 self-brief.ts renderMentionNote）。"""
-    called = "@了你" if is_at else "提到了你"
-    who = f"（是 {caller_name}）" if caller_name and caller_name != where_name else ""
-    stamp = f"{at_label}，" if at_label else ""
-    talking = f"那边在聊：{topic.strip()}。" if topic and topic.strip() else ""
+    head = _mention_head(where_name, caller_name, is_at, at_label)
+    talking = _talking(topic)
 
     if unread <= 0:
         return (
-            f"{stamp}{where_name} 里有人{called}{who}，这条你还没看。{talking}"
+            f"{head}，这条你还没看。{talking}"
             f"要看就用 read_channel(sid={umo})。回不回你自己定。"
         )
     return (
-        f"{stamp}{where_name} 里有人{called}{who}，那边一共有 {unread} 条未读。{talking}"
+        f"{head}，那边一共有 {unread} 条未读。{talking}"
         f"要看就用 read_channel(sid={umo})：只想看叫你的那几句就把 limit 调小，想全看就调大。回不回你自己定。"
     )
 
@@ -201,12 +213,9 @@ def render_mention_notice_with_digest(
     digest: str,
 ) -> str:
     """生成已附读群结果的点名通知，保留消息编号与翻页指路。"""
-    called = "@了你" if is_at else "提到了你"
-    who = f"（是 {caller_name}）" if caller_name and caller_name != where_name else ""
-    stamp = f"{at_label}，" if at_label else ""
-    talking = f"那边在聊：{topic.strip()}。" if topic and topic.strip() else ""
+    head = _mention_head(where_name, caller_name, is_at, at_label)
     return (
-        f"{stamp}{where_name} 里有人{called}{who}，那边一共有 {unread} 条未读。{talking}\n"
+        f"{head}，那边一共有 {unread} 条未读。{_talking(topic)}\n"
         f"下面就是刚才叫你的消息和前后文，已经帮你读过了（标记已读），不用再 read_channel 这个群（sid={umo}）：\n"
         f"{digest}\n"
         "想往前翻更早的，照上面的提示传 before 用 read_channel。回不回你自己定。"

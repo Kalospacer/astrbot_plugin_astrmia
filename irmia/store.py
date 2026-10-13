@@ -110,6 +110,31 @@ class ChannelMessageRow:
     is_bot: bool
 
 
+#: 账本两张消息表（AstrHe messages / 兜底 fallback_messages）共有的读取列
+MESSAGE_COLUMNS = (
+    "id, umo, platform_id, message_type, session_id, platform_message_id, "
+    "sender_id, sender_name, sender_card, text, ts, is_bot"
+)
+
+
+def _row_to_message(r: sqlite3.Row) -> ChannelMessageRow:
+    """把按 MESSAGE_COLUMNS 查出的一行转成信箱消息视图。"""
+    return ChannelMessageRow(
+        id=int(r["id"]),
+        umo=str(r["umo"]),
+        platform_id=str(r["platform_id"] or ""),
+        message_type=str(r["message_type"] or ""),
+        session_id=str(r["session_id"] or ""),
+        platform_message_id=str(r["platform_message_id"] or ""),
+        sender_id=str(r["sender_id"] or ""),
+        sender_name=str(r["sender_name"] or ""),
+        sender_card=str(r["sender_card"] or ""),
+        text=str(r["text"] or ""),
+        ts=float(r["ts"] or 0.0),
+        is_bot=bool(r["is_bot"]),
+    )
+
+
 def parse_umo(umo: str) -> tuple[str, str, str]:
     """解析三段式 UMO 字符串（platform_id:message_type:session_id）。
 
@@ -625,30 +650,12 @@ class IrmiaStore:
             params.append(int(after_id))
         where_sql = " AND ".join(clauses)
         sql = (
-            f"SELECT id, umo, platform_id, message_type, session_id, "
-            f"platform_message_id, sender_id, sender_name, sender_card, "
-            f"text, ts, is_bot "
+            f"SELECT {MESSAGE_COLUMNS} "
             f"FROM {table} WHERE {where_sql} ORDER BY id DESC LIMIT ?"
         )
         params.append(int(limit))
         rows = db_conn.execute(sql, tuple(params)).fetchall()
-        result = [
-            ChannelMessageRow(
-                id=int(r["id"]),
-                umo=str(r["umo"]),
-                platform_id=str(r["platform_id"] or ""),
-                message_type=str(r["message_type"] or ""),
-                session_id=str(r["session_id"] or ""),
-                platform_message_id=str(r["platform_message_id"] or ""),
-                sender_id=str(r["sender_id"] or ""),
-                sender_name=str(r["sender_name"] or ""),
-                sender_card=str(r["sender_card"] or ""),
-                text=str(r["text"] or ""),
-                ts=float(r["ts"] or 0.0),
-                is_bot=bool(r["is_bot"]),
-            )
-            for r in reversed(rows)
-        ]
+        result = [_row_to_message(r) for r in reversed(rows)]
         if table == "messages" and before_id is None and umo in self._pending_bot_speeches:
             wall_now = time.time()
             pid, mtype, sid = parse_umo(umo)
@@ -693,27 +700,11 @@ class IrmiaStore:
         """按会话和行号从同一账本来源查询消息，不混用两张表的编号。"""
         conn, table = self._select_source_for_umo(umo)
         row = conn.execute(
-            f"SELECT id, umo, platform_id, message_type, session_id, platform_message_id, "
-            f"sender_id, sender_name, sender_card, text, ts, is_bot FROM {table} "
+            f"SELECT {MESSAGE_COLUMNS} FROM {table} "
             "WHERE umo=? AND id=? AND recalled=0",
             (umo, msg_id),
         ).fetchone()
-        if row is None:
-            return None
-        return ChannelMessageRow(
-            id=int(row["id"]),
-            umo=str(row["umo"]),
-            platform_id=str(row["platform_id"] or ""),
-            message_type=str(row["message_type"] or ""),
-            session_id=str(row["session_id"] or ""),
-            platform_message_id=str(row["platform_message_id"] or ""),
-            sender_id=str(row["sender_id"] or ""),
-            sender_name=str(row["sender_name"] or ""),
-            sender_card=str(row["sender_card"] or ""),
-            text=str(row["text"] or ""),
-            ts=float(row["ts"] or 0.0),
-            is_bot=bool(row["is_bot"]),
-        )
+        return _row_to_message(row) if row is not None else None
 
     def has_unseen_bot_speech(self, umo: str) -> bool:
         """判断该会话是否有尚未被 read_channel 核对展示过的 Bot 自身发言。"""

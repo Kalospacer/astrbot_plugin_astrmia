@@ -3,16 +3,16 @@
 from __future__ import annotations
 
 import asyncio
-import re
 from pathlib import Path
 from typing import Any, Callable
 
 from pydantic import Field
 from pydantic.dataclasses import dataclass as pydantic_dataclass
 
+from .config import IrmiaConfig
 from .store import IrmiaStore, parse_umo
 from .vision import VisionStore
-from .vision_describe import Captioner
+from .vision_describe import ANY_IMAGE_RE, Captioner
 
 try:
     from astrbot.api import FunctionTool
@@ -34,7 +34,9 @@ class ReadImageTool(FunctionTool):
     """AstrBot 标准 dataclass 形态的 read_image 工具。"""
 
     name: str = "read_image"
-    description: str = READ_IMAGE_DESCRIPTION.format(keep_days=3)
+    description: str = READ_IMAGE_DESCRIPTION.format(
+        keep_days=IrmiaConfig.image_keep_days
+    )
     parameters: dict = Field(
         default_factory=lambda: {
             "type": "object",
@@ -86,7 +88,7 @@ async def execute_read_image(
     row = await asyncio.to_thread(store.get_message, sid, msg_id)
     if row is None:
         return f"这个会话里没有 #{msg_id} 这条消息。"
-    count = len(re.findall(r"\[图片(?:[:：][^\]]*)?\]", row.text))
+    count = len(ANY_IMAGE_RE.findall(row.text))
     if count == 0:
         return "这条消息没有图。"
     if index < 1 or index > count:

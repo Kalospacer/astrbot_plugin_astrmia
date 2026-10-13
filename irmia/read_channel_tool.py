@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass, field
 from typing import Any, Callable, Sequence
 
@@ -12,7 +11,7 @@ from pydantic.dataclasses import dataclass as pydantic_dataclass
 from .inbox import mentions_keyword
 from .render import format_short_time
 from .store import ChannelMessageRow, IrmiaStore, parse_umo
-from .vision_describe import Captioner, render_with_captions
+from .vision_describe import Captioner, captions_for, render_with_captions
 
 try:
     from astrbot.api import FunctionTool
@@ -170,12 +169,7 @@ async def execute_read_channel(
                 else ""
             )
             raw_text = (r.text or "").replace("\r\n", "\n").strip()
-            raw_text = render_with_captions(
-                raw_text,
-                captions.get(r.id)
-                if not r.is_bot and r.platform_message_id
-                else None,
-            )
+            raw_text = render_with_captions(raw_text, captions_for(r, captions))
             body = raw_text or "[空消息]"
             lines.append(f"{prefix}[{stamp} #{r.id}] {who}: {body}")
         return lines

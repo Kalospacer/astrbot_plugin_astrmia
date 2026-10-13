@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import hashlib
 import io
+import os
 import sqlite3
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
@@ -21,6 +23,8 @@ DHASH_THRESHOLD = 4
 DHASH_SCAN_LIMIT = 500
 KEEP_LONG_SIDE = 1024
 KEEP_JPEG_QUALITY = 85
+#: 孤儿文件至少存在这么久才清理，避开「已写盘、尚未登记」的瞬间
+ORPHAN_GRACE_SEC = 600
 
 VISION_SCHEMA = """
 CREATE TABLE IF NOT EXISTS kept_images (
@@ -59,7 +63,6 @@ class KeptImage:
     sha256: str
     dhash: str
     path: str
-    created_at: float
 
 
 def compute_dhash(image: Image.Image) -> str:
@@ -80,25 +83,32 @@ def hamming_distance(a: str, b: str) -> int:
 
 
 def make_kept_jpeg(src_path: str, keep_root: Path) -> tuple[str, str, str]:
-    """按原图哈希留底 JPEG；动图取首帧，透明区域贴白底，同图不重写。"""
+    """按原图哈希留底 JPEG；动图取首帧，透明区域贴白底，同图不重写。
+
+    先写同目录临时文件再原子改名，并发写同一张图时读者只会看到完整文件。
+    """
     raw = Path(src_path).read_bytes()
     sha = hashlib.sha256(raw).hexdigest()
     target = keep_root.resolve() / sha[:2] / f"{sha}.jpg"
-    if target.is_file():
-        with Image.open(target) as image:
-            return sha, compute_dhash(image), str(target)
-    with Image.open(io.BytesIO(raw)) as original:
-        if original.mode in ("RGBA", "LA") or (
-            original.mode == "P" and "transparency" in original.info
-        ):
-            rgba = original.convert("RGBA")
-            image = Image.new("RGB", rgba.size, "white")
-            image.paste(rgba, mask=rgba.getchannel("A"))
-        else:
-            image = original.convert("RGB")
-        image.thumbnail((KEEP_LONG_SIDE, KEEP_LONG_SIDE), Image.Resampling.LANCZOS)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        image.save(target, "JPEG", quality=KEEP_JPEG_QUALITY)
+    if not target.is_file():
+        with Image.open(io.BytesIO(raw)) as original:
+            if original.mode in ("RGBA", "LA") or (
+                original.mode == "P" and "transparency" in original.info
+            ):
+                rgba = original.convert("RGBA")
+                image = Image.new("RGB", rgba.size, "white")
+                image.paste(rgba, mask=rgba.getchannel("A"))
+            else:
+                image = original.convert("RGB")
+            image.thumbnail((KEEP_LONG_SIDE, KEEP_LONG_SIDE), Image.Resampling.LANCZOS)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            tmp = target.with_name(f"{target.stem}.{uuid.uuid4().hex}.tmp")
+            image.save(tmp, "JPEG", quality=KEEP_JPEG_QUALITY)
+            try:
+                os.replace(tmp, target)
+            except PermissionError:
+                # Windows 上目标正被另一线程读取时不允许覆盖；同 sha 内容相同，别人写好即可
+                tmp.unlink()
     # 缓存新图和重复图都以最终 JPEG 算 dHash，避免压缩导致哈希不同。
     with Image.open(target) as image:
         return sha, compute_dhash(image), str(target)
@@ -132,10 +142,9 @@ class VisionStore:
                 self._conn = None
 
     def keep_image(self, umo: str, pmid: str, idx: int, src_path: str) -> None:
-        """串行保存并登记引用，避免同图并发写入或清理未登记的文件。"""
-        with self._lock:
-            sha, dhash, path = make_kept_jpeg(src_path, self.keep_root)
-            self.add_kept(umo, pmid, idx, sha, dhash, path)
+        """保存并登记一张留底图；缩放编码在锁外做，避免长时间占住数据库锁。"""
+        sha, dhash, path = make_kept_jpeg(src_path, self.keep_root)
+        self.add_kept(umo, pmid, idx, sha, dhash, path)
 
     def add_kept(
         self, umo: str, pmid: str, idx: int, sha256: str, dhash: str, path: str
@@ -172,7 +181,6 @@ class VisionStore:
                     row["sha256"],
                     row["dhash"],
                     row["path"],
-                    row["created_at"],
                 )
             )
         return result
@@ -238,10 +246,13 @@ class VisionStore:
                 for r in self._conn.execute("SELECT DISTINCT sha256 FROM kept_images")
             }
             files = 0
-            for path in self.keep_root.glob("*/*.jpg"):
-                if path.stem not in referenced:
-                    path.unlink()
-                    files += 1
+            for path in self.keep_root.glob("*/*"):
+                if path.suffix not in (".jpg", ".tmp") or path.stem in referenced:
+                    continue
+                if now - path.stat().st_mtime < ORPHAN_GRACE_SEC:
+                    continue
+                path.unlink()
+                files += 1
             for folder in self.keep_root.iterdir():
                 if folder.is_dir() and not any(folder.iterdir()):
                     folder.rmdir()

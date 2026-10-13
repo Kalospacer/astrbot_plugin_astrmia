@@ -11,7 +11,7 @@ from typing import Any, Callable
 
 from .config import IrmiaConfig
 from .store import ChannelMessageRow, IrmiaStore
-from .vision_describe import Captioner, render_with_captions
+from .vision_describe import Captioner, captions_for, render_with_captions
 
 
 def build_topic_prompt(lines: list[str], max_chars: int) -> str:
@@ -161,12 +161,7 @@ class TopicSummarizer:
                 raw = str(m.text or "").strip()
                 if not raw:
                     continue
-                raw = render_with_captions(
-                    raw,
-                    captions.get(m.id)
-                    if not m.is_bot and m.platform_message_id
-                    else None,
-                )
+                raw = render_with_captions(raw, captions_for(m, captions))
                 lines.append(
                     f"{alias_of(m)}: {raw.replace(chr(10), ' ')[: cfg.topic_line_max_chars]}"
                 )

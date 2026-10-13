@@ -15,16 +15,20 @@ async def keep_event_images(
     if not platform_message_id:
         return 0
     images = [c for c in event.message_obj.message if type(c).__name__ == "Image"]
-    kept = 0
-    for idx, comp in enumerate(images):
+    if not images:
+        return 0
+
+    async def _keep(idx: int, comp: Any) -> bool:
         try:
             src = await comp.convert_to_file_path()
             await asyncio.to_thread(
                 vstore.keep_image, umo, platform_message_id, idx, src
             )
-            kept += 1
+            return True
         except Exception as exc:
             logger.debug(
                 f"[IRMIA] 图片留底失败 ({umo} #{platform_message_id}/{idx}): {exc!r}"
             )
-    return kept
+            return False
+
+    return sum(await asyncio.gather(*(_keep(i, c) for i, c in enumerate(images))))

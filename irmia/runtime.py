@@ -359,9 +359,7 @@ class IrmiaRuntime:
         called_sid = None
         repeat_reads = None
         if ev is not None and hasattr(ev, "get_extra"):
-            # 内嵌通知已读过本轮叫醒群，工具不再兜底重复展示最近消息。
-            if not ev.get_extra("irmia_mention_inlined"):
-                called_sid = ev.get_extra("irmia_called_sid")
+            called_sid = ev.get_extra("irmia_called_sid")
             repeat_reads = ev.get_extra("irmia_repeat_reads")
 
         return await execute_read_channel(
@@ -600,7 +598,9 @@ class IrmiaRuntime:
                 "topic": cached_topic,
             },
         )
-        event.set_extra("irmia_called_sid", umo)
+        # 内嵌通知会替她读过这个群；只有不内嵌时，工具才需要按「本轮叫醒群」兜底展示最近消息
+        if not cfg.mention_inline_enabled:
+            event.set_extra("irmia_called_sid", umo)
 
     # ---------------- 钩子 2：等待 LLM 请求（主脑排队） ----------------
 
@@ -655,7 +655,7 @@ class IrmiaRuntime:
         if isinstance(mention_meta, dict):
             mention_notice = await build_mention_notice(
                 store=self.store,
-                sid=event.get_extra("irmia_called_sid"),
+                sid=umo,
                 meta=mention_meta,
                 cfg=cfg,
                 bot_self_ids=self._bot_self_ids,
@@ -663,7 +663,6 @@ class IrmiaRuntime:
                 captioner=self.captioner,
             )
             event.set_extra("irmia_mention_notice", mention_notice)
-            event.set_extra("irmia_mention_inlined", cfg.mention_inline_enabled)
             req.prompt = mention_notice
             if isinstance(getattr(req, "image_urls", None), list):
                 req.image_urls.clear()

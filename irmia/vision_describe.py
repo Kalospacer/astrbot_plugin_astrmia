@@ -18,7 +18,23 @@ ATTEMPTS_PER_PROVIDER = 2
 CAPTION_CONCURRENCY = 3
 STICKER_RE = re.compile(r"^\[图片\]\s*\[[^\[\]]{1,8}\]$")
 BARE_IMAGE_RE = re.compile(r"\[图片\](?!\s*[:：])")
+#: 账本里的任意图片占位符：裸 `[图片]` 或已带描述 `[图片: 描述]`，用于数一条消息里有几张图
+ANY_IMAGE_RE = re.compile(r"\[图片(?:[:：][^\]]*)?\]")
 PENDING_TEXT = "还没看清，可用 read_image 细看"
+
+
+def captions_for(
+    row: ChannelMessageRow, captions: dict[int, list[str | None]]
+) -> list[str | None] | None:
+    """取某行的图片描述槽位。
+
+    `caption_rows` 只给真实的外部带图消息建 key；`fetch_messages` 会插入
+    「账本还没记上」的自身发言伪行（id 借用相邻消息），这里必须挡住，
+    否则她会拿旁边那条消息的图片描述当自己的。
+    """
+    if row.is_bot or not row.platform_message_id:
+        return None
+    return captions.get(row.id)
 
 
 async def describe_once(
