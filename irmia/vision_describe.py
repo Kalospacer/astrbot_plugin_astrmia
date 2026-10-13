@@ -16,7 +16,8 @@ DETAIL_PROMPT = "请用自然流畅的中文客观描述这张图：整体场景
 QA_PROMPT = "针对这张图回答问题：{question}\n只根据图里看得见的内容回答，看不出来就直说看不出来。{n} 字以内。"
 ATTEMPTS_PER_PROVIDER = 2
 CAPTION_CONCURRENCY = 3
-STICKER_RE = re.compile(r"^\[图片\]\s*\[[^\[\]]{1,8}\]$")
+#: QQ 小表情：一张图紧跟方括号表情名（如 `[图片][吓]`）；表情名不能是「图片」，否则连发两图会被误跳过
+STICKER_RE = re.compile(r"^\[图片\]\s*\[(?!图片)[^\[\]]{1,8}\]$")
 BARE_IMAGE_RE = re.compile(r"\[图片\](?!\s*[:：])")
 #: 账本里的任意图片占位符：裸 `[图片]` 或已带描述 `[图片: 描述]`，用于数一条消息里有几张图
 ANY_IMAGE_RE = re.compile(r"\[图片(?:[:：][^\]]*)?\]")

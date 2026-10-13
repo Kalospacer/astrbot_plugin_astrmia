@@ -54,7 +54,7 @@ class IrmiaConfig:
     image_brief_max_chars: int = 80
     read_image_max_chars: int = 500
     vision_provider_ids: list[str] = field(default_factory=list)
-    vision_timeout_sec: int = 30
+    vision_timeout_sec: int = 60
     vision_cache_ttl_days: int = 30
     topic_max_chars: int = 24
     topic_context_messages: int = 25
@@ -218,7 +218,7 @@ def load_irmia_config(raw: dict[str, Any] | None) -> IrmiaConfig:
             for p in cfg.get("vision_provider_ids", [])
             if str(p).strip()
         ],
-        vision_timeout_sec=_int("vision_timeout_sec", 30, minimum=1),
+        vision_timeout_sec=_int("vision_timeout_sec", 60, minimum=1),
         vision_cache_ttl_days=_int("vision_cache_ttl_days", 30),
         topic_max_chars=_group_int("topic_options", "max_chars", 24),
         topic_context_messages=_group_int("topic_options", "context_messages", 25),

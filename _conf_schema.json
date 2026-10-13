@@ -148,8 +148,8 @@
   "vision_timeout_sec": {
     "description": "单次识图调用超时（秒）",
     "type": "int",
-    "default": 30,
-    "hint": "每次模型调用的等待上限，失败或超时后重试，再尝试下一个模型。"
+    "default": 60,
+    "hint": "每次模型调用的等待上限，失败或超时后重试，再尝试下一个模型。实测读一张图可能接近一分钟（视觉模型带思考时更慢），设太小会白跑一次重试。"
   },
   "topic_image_caption_enabled": {
     "description": "话题概括时给窗口里的图片配描述",
