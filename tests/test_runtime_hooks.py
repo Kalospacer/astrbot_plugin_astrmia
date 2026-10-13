@@ -180,7 +180,7 @@ def test_runtime_end_to_end_flow(tmp_path: Path) -> None:
         await rt.initialize()
         assert len(ctx.registered_tools) == 2
         assert ctx.registered_tools[0].name == "read_channel"
-        assert ctx.registered_tools[1].name == "look_image"
+        assert ctx.registered_tools[1].name == "read_image"
 
         # 1. AstrHe 的 SilentNightEvent 必须完全让路，不拦不改
         night_ev = SilentNightEvent(

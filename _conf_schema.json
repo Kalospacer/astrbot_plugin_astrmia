@@ -90,23 +90,66 @@
     "default": 8,
     "hint": "开始大于结束表示跨零点，例如 22 到 8 覆盖 22:00 至次日 08:00。两个值相同视为不静默。"
   },
-  "topic_image_caption_enabled": {
-    "description": "话题概括时顺手识别窗口里的图片",
+  "image_keep_days": {
+    "description": "收到的图片缩小留底保留天数",
+    "type": "int",
+    "default": 3,
+    "hint": "在 Mia 自己的数据目录保存缩小的 JPEG，超过天数后清理；GIF 取第一帧。0 表示不留底，不再保存新图。"
+  },
+  "read_channel_image_enabled": {
+    "description": "读群时给图片配一句描述",
     "type": "bool",
     "default": true,
-    "hint": "开启后，点名唤醒做话题概括时会取最近 25 条窗口里带图的消息，查缓存补描述、查不到的调一次轻量模型识图，描述同时写回账本，read_channel 之后就能看到图里写了什么。关掉就只概括文字。"
+    "hint": "read_channel 只识别本次展示的留底图，优先查缓存；带方括号表情名的表情包跳过。"
+  },
+  "read_channel_image_max": {
+    "description": "每次读群最多新识别的图片张数",
+    "type": "int",
+    "default": 6,
+    "hint": "优先识别展示行里最新的图片，缓存命中的不占名额。0 表示只用缓存。"
+  },
+  "read_channel_image_wait_sec": {
+    "description": "读群最多等待识图的秒数",
+    "type": "int",
+    "default": 8,
+    "hint": "没等到的先标「还没看清」，后台继续识别并写缓存，下次读取可用。"
+  },
+  "image_brief_max_chars": {
+    "description": "读群与话题概括的图片简述字数上限",
+    "type": "int",
+    "default": 80,
+    "hint": "一句话说图中内容，包含能看清的关键文字。"
+  },
+  "read_image_max_chars": {
+    "description": "read_image 详细描述与回答字数上限",
+    "type": "int",
+    "default": 500,
+    "hint": "不带问题时给详细描述，带问题时只回答问题；两种结果各自缓存。"
+  },
+  "vision_provider_ids": {
+    "description": "识图模型降级链（按列表顺序尝试）",
+    "type": "list",
+    "default": [],
+    "_special": "select_providers",
+    "hint": "按顺序填写支持图片的 Provider ID，每个模型最多尝试两次。留空用 light_provider_id，轻量模型也未配置时用当前会话默认模型。"
+  },
+  "vision_timeout_sec": {
+    "description": "单次识图调用超时（秒）",
+    "type": "int",
+    "default": 30,
+    "hint": "每次模型调用的等待上限，失败或超时后重试，再尝试下一个模型。"
+  },
+  "topic_image_caption_enabled": {
+    "description": "话题概括时给窗口里的图片配描述",
+    "type": "bool",
+    "default": true,
+    "hint": "点名唤醒做话题概括时给窗口里的图配描述，和 read_channel 共用缓存，不写回账本。关闭则只概括原始文字。"
   },
   "vision_cache_ttl_days": {
-    "description": "识图缓存过期天数",
+    "description": "图片描述缓存未使用多少天后清理",
     "type": "int",
-    "default": 7,
-    "hint": "图片描述缓存超过这个天数就会被清理。启动时清一次，之后每小时搭心跳的顺风车清一次。填 0 表示不过期。识图能力已内置到 IRMIA，不再依赖 astrbot_plugin_irmia_vision 插件。"
-  },
-  "vision_cache_db": {
-    "description": "识图缓存数据库路径（留空用默认）",
-    "type": "string",
-    "default": "",
-    "hint": "留空时用 /AstrBot/data/plugin_data/astrbot_plugin_irmia_vision/vision_cache.db，沿用原插件的缓存文件，历史记录直接可用。"
+    "default": 30,
+    "hint": "按最后使用时间计算，只清 Mia 自己的缓存；0 表示不过期。启动时清理一次，之后每小时清理，关闭心跳唤醒也照常清理。"
   },
   "intercept_direct_reply": {
     "description": "工具已发到当前窗口时收起末尾回复",

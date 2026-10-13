@@ -45,8 +45,15 @@ class IrmiaConfig:
     heartbeat_quiet_end_hour: int = 8
     intercept_direct_reply: bool = False
     topic_image_caption_enabled: bool = True
-    vision_cache_ttl_days: int = 7
-    vision_cache_db: str = ""
+    image_keep_days: int = 3
+    read_channel_image_enabled: bool = True
+    read_channel_image_max: int = 6
+    read_channel_image_wait_sec: int = 8
+    image_brief_max_chars: int = 80
+    read_image_max_chars: int = 500
+    vision_provider_ids: list[str] = field(default_factory=list)
+    vision_timeout_sec: int = 30
+    vision_cache_ttl_days: int = 30
     topic_max_chars: int = 24
     topic_context_messages: int = 25
     topic_line_max_chars: int = 120
@@ -196,8 +203,19 @@ def load_irmia_config(raw: dict[str, Any] | None) -> IrmiaConfig:
         topic_image_caption_enabled=bool(
             cfg.get("topic_image_caption_enabled", True)
         ),
-        vision_cache_ttl_days=_int("vision_cache_ttl_days", 7, minimum=0),
-        vision_cache_db=str(cfg.get("vision_cache_db", "") or "").strip(),
+        image_keep_days=_int("image_keep_days", 3),
+        read_channel_image_enabled=bool(cfg.get("read_channel_image_enabled", True)),
+        read_channel_image_max=_int("read_channel_image_max", 6),
+        read_channel_image_wait_sec=_int("read_channel_image_wait_sec", 8),
+        image_brief_max_chars=_int("image_brief_max_chars", 80, minimum=1),
+        read_image_max_chars=_int("read_image_max_chars", 500, minimum=1),
+        vision_provider_ids=[
+            str(p).strip()
+            for p in cfg.get("vision_provider_ids", [])
+            if str(p).strip()
+        ],
+        vision_timeout_sec=_int("vision_timeout_sec", 30, minimum=1),
+        vision_cache_ttl_days=_int("vision_cache_ttl_days", 30),
         topic_max_chars=_group_int("topic_options", "max_chars", 24),
         topic_context_messages=_group_int("topic_options", "context_messages", 25),
         topic_line_max_chars=_group_int("topic_options", "line_max_chars", 120),

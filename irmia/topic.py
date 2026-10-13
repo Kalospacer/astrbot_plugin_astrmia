@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import re
 import time
 import uuid
@@ -12,18 +11,7 @@ from typing import Any, Callable
 
 from .config import IrmiaConfig
 from .store import ChannelMessageRow, IrmiaStore
-from .vision import (
-    VisionCache,
-    describe_and_cache,
-    is_image_path,
-    replace_bare_placeholder,
-)
-
-#: 账本里的图片占位符，与 AstrHe recorder 保持一致
-IMAGE_PLACEHOLDER = "[图片]"
-
-#: 单轮话题概括最多识几张图（图太密集时只补前几张，避免一次调用塞爆）
-MAX_CAPTION_IMAGES = 6
+from .vision_describe import Captioner, render_with_captions
 
 
 def build_topic_prompt(lines: list[str], max_chars: int) -> str:
@@ -71,22 +59,6 @@ def parse_topic_from_text(raw: str, max_chars: int) -> str | None:
     return cleaned[:max_chars] if cleaned else None
 
 
-def _parse_media_refs(media: str) -> list[str]:
-    """解析账本 media 列里的图片引用（JSON 数组，兼容单串与坏数据）。"""
-    raw = str(media or "").strip()
-    if not raw:
-        return []
-    try:
-        parsed = json.loads(raw)
-    except Exception:
-        return [raw] if raw else []
-    if isinstance(parsed, list):
-        return [str(x).strip() for x in parsed if str(x).strip()]
-    if isinstance(parsed, str) and parsed.strip():
-        return [parsed.strip()]
-    return []
-
-
 def _make_aliaser(
     name_resolver: Callable[[ChannelMessageRow], str | None] | None,
 ) -> Callable[[ChannelMessageRow], str]:
@@ -127,8 +99,7 @@ class TopicSummarizer:
         self.context = context
         self.logger = logger
         self._running_umos: set[str] = set()
-        # IRMIA 自己带一份识图缓存（之前挂在 astrbot_plugin_irmia_vision 上，现在内置了）
-        self.vision_cache = VisionCache()
+        self.captioner: Captioner | None = None
 
     async def maybe_summarize(
         self,
@@ -177,17 +148,25 @@ class TopicSummarizer:
             if provider is None:
                 return existing_topic or None
 
-            # 顺手把这一窗口里的图片转成描述：查缓存优先，查不到的一次调用批量识图。
-            # 出来的描述既拼进喂给模型的原料，也回写账本，下次 read_channel 直接带上。
-            described = await self._describe_window_images(umo, cfg, recent, provider)
+            captions = {}
+            if cfg.topic_image_caption_enabled and self.captioner is not None:
+                captions = await self.captioner.caption_rows(
+                    recent,
+                    wait_sec=cfg.vision_timeout_sec,
+                    max_new=cfg.read_channel_image_max,
+                )
 
             lines = []
             for m in recent:
                 raw = str(m.text or "").strip()
                 if not raw:
                     continue
-                if m.id in described:
-                    raw = replace_bare_placeholder(raw, described[m.id]) or raw
+                raw = render_with_captions(
+                    raw,
+                    captions.get(m.id)
+                    if not m.is_bot and m.platform_message_id
+                    else None,
+                )
                 lines.append(
                     f"{alias_of(m)}: {raw.replace(chr(10), ' ')[: cfg.topic_line_max_chars]}"
                 )
@@ -214,68 +193,6 @@ class TopicSummarizer:
             return existing_topic or None
         finally:
             self._running_umos.discard(umo)
-
-    async def _describe_window_images(
-        self,
-        umo: str,
-        cfg: IrmiaConfig,
-        recent: list[ChannelMessageRow],
-        provider: Any,
-    ) -> dict[int, str]:
-        """把窗口里带图的账本消息补上图片描述，返回 {消息 id: 描述}。
-
-        流程：先按 media 列拿图片路径 → 查缓存（命中就直接用）→ 剩下的一次批量调
-        VL 模型 → 描述写回账本 text（下游 read_channel 下次自动带上）。
-
-        整段都是 best-effort：单张失败跳过，异常吞掉只记日志，绝不影响话题概括。
-        """
-        if not cfg.topic_image_caption_enabled:
-            return {}
-
-        targets: list[tuple[int, str, str]] = []  # (消息 id, 原始 text, 图片路径)
-        for m in recent:
-            text = str(m.text or "")
-            if IMAGE_PLACEHOLDER not in text or "[图片:" in text:
-                continue
-            for ref in _parse_media_refs(m.media):
-                if await asyncio.to_thread(is_image_path, ref):
-                    targets.append((m.id, text, ref))
-                    break
-            if len(targets) >= MAX_CAPTION_IMAGES:
-                break
-
-        if not targets:
-            return {}
-
-        try:
-            captions = await describe_and_cache(
-                self.vision_cache,
-                provider,
-                [item[2] for item in targets],
-                model_id=cfg.light_provider_id or "unknown",
-                ttl_days=cfg.vision_cache_ttl_days,
-                max_chars=max(20, cfg.topic_max_chars // 2),
-                timeout_sec=cfg.light_timeout_sec,
-                logger=self.logger,
-            )
-        except Exception as exc:
-            self.logger.debug(f"[IRMIA] 窗口识图跳过 ({umo}): {exc!r}")
-            return {}
-
-        result: dict[int, str] = {}
-        for (msg_id, old_text, _ref), caption in zip(targets, captions):
-            clean = str(caption or "").strip()
-            if not clean:
-                continue
-            new_text = replace_bare_placeholder(old_text, clean)
-            if not new_text:
-                continue
-            result[msg_id] = clean
-            try:
-                await asyncio.to_thread(self.store.update_message_text, msg_id, new_text)
-            except Exception as exc:
-                self.logger.debug(f"[IRMIA] 图片描述回写账本失败 ({msg_id}): {exc!r}")
-        return result
 
     async def resolve_provider(self, umo: str, light_provider_id: str) -> Any:
         """优先获取配置的 light_provider_id，未配置或不存在时回退当前默认聊天模型。"""

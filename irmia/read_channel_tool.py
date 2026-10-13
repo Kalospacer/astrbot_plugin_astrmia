@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import os
+import asyncio
 from dataclasses import dataclass, field
 from typing import Any, Callable, Sequence
 
@@ -12,14 +12,7 @@ from pydantic.dataclasses import dataclass as pydantic_dataclass
 from .inbox import mentions_keyword
 from .render import format_short_time
 from .store import ChannelMessageRow, IrmiaStore, parse_umo
-from .topic import _parse_media_refs
-from .vision import (
-    VisionCache,
-    compute_dhash,
-    is_image_path,
-    replace_bare_placeholder,
-    sha256_of_file,
-)
+from .vision_describe import Captioner, render_with_captions
 
 try:
     from astrbot.api import FunctionTool
@@ -112,49 +105,6 @@ def _paging_footer(
     return "—— 已经是这个会话最早的记录了。"
 
 
-def _enrich_body_from_cache(
-    text: str,
-    media: str,
-    cache: VisionCache | None,
-    ttl_days: int = 7,
-) -> str:
-    """若 text 含裸 `[图片]` 且 media 有图片引用，只查 vision_cache（含 dHash 判重）补上描述。
-
-    只查缓存、绝不调模型，单条失败静默跳过，开销接近零。
-    """
-    if not text or "[图片]" not in text or not media or cache is None:
-        return text
-    refs = _parse_media_refs(media)
-    if not refs:
-        return text
-    if not cache.open_safe():
-        return text
-    updated = text
-    for ref in refs:
-        if "[图片]" not in updated:
-            break
-        try:
-            has_file = is_image_path(ref)
-            sha = sha256_of_file(ref) if has_file else ""
-            dhash = compute_dhash(ref) if has_file else ""
-            hit = cache.find(
-                path=ref,
-                sha256=sha,
-                filename=os.path.basename(ref),
-                dhash=dhash,
-                ttl_days=ttl_days,
-            )
-            if hit is not None:
-                desc = (hit.summary or hit.text).strip()
-                if desc:
-                    replaced = replace_bare_placeholder(updated, desc)
-                    if replaced:
-                        updated = replaced
-        except Exception:
-            continue
-    return updated
-
-
 async def execute_read_channel(
     *,
     store: IrmiaStore,
@@ -167,8 +117,9 @@ async def execute_read_channel(
     called_sid_this_turn: str | None = None,
     tz_name: str = "Asia/Shanghai",
     repeat_counter: dict[str, int] | None = None,
-    vision_cache: VisionCache | None = None,
-    vision_cache_ttl_days: int = 7,
+    captioner: Captioner | None = None,
+    caption_wait_sec: float = 8,
+    caption_max_new: int = 6,
 ) -> str:
     """执行 read_channel 核心逻辑（纯业务函数，便于直接单测与工具调用）。"""
     target_sid = str(sid or "").strip()
@@ -199,10 +150,11 @@ async def execute_read_channel(
         }
 
     def _render_rows(
-        rows: Sequence[ChannelMessageRow], mentioned_set: set[int]
+        rows: Sequence[ChannelMessageRow],
+        mentioned_set: set[int],
+        captions: dict[int, list[str | None]],
     ) -> list[str]:
         lines: list[str] = []
-        eff_cache: VisionCache | None = vision_cache
         for r in rows:
             stamp = format_short_time(r.ts, tz_name)
             who = (
@@ -218,12 +170,12 @@ async def execute_read_channel(
                 else ""
             )
             raw_text = (r.text or "").replace("\r\n", "\n").strip()
-            if raw_text and "[图片]" in raw_text and getattr(r, "media", ""):
-                if eff_cache is None:
-                    eff_cache = VisionCache()
-                raw_text = _enrich_body_from_cache(
-                    raw_text, r.media, eff_cache, vision_cache_ttl_days
-                )
+            raw_text = render_with_captions(
+                raw_text,
+                captions.get(r.id)
+                if not r.is_bot and r.platform_message_id
+                else None,
+            )
             body = raw_text or "[空消息]"
             lines.append(f"{prefix}[{stamp} #{r.id}] {who}: {body}")
         return lines
@@ -257,7 +209,10 @@ async def execute_read_channel(
             more=len(batch) >= eff_limit,
             page_size=READ_CHANNEL_PAGE_SIZE,
         )
-        return "\n".join([header, *_render_rows(batch, mentioned), footer])
+        captions = await captioner.caption_rows(
+            batch, wait_sec=caption_wait_sec, max_new=caption_max_new
+        ) if captioner else {}
+        return "\n".join([header, *_render_rows(batch, mentioned, captions), footer])
 
     # ── 默认模式：读取最近消息池 ──
     pool_size = max(eff_limit * 4, 100)
@@ -407,9 +362,12 @@ async def execute_read_channel(
         else None
     )
 
+    captions = await captioner.caption_rows(
+        display, wait_sec=caption_wait_sec, max_new=caption_max_new
+    ) if captioner else {}
     out_lines = [
         f"{target_sid} · {where_label}｜最近 {len(display)} 条{comp_str}（本机时间，从旧到新；已读到 id={new_read_up_to}）",
-        *_render_rows(display, mentioned_set),
+        *_render_rows(display, mentioned_set, captions),
         _paging_footer(
             next_before=display_floor,
             more=more_history_below,
@@ -431,6 +389,7 @@ class ReadChannelTool(FunctionTool):
         f"默认只给未读里叫了你的消息和每条之前 {READ_CHANNEL_MENTION_CONTEXT} 条，叫了你的行前面有 ▶；未读不到一屏就全给。读过的会标记已读。"
         f"传 before 可以往前翻历史，每页 {READ_CHANNEL_PAGE_SIZE} 条，翻页不改已读。"
         "要说话用 send_message_to_user。"
+        "图片后面会带一句描述；想细看或者问图里的具体内容，用 read_image（传 sid 和行首的 #编号）。"
     )
     parameters: dict = Field(
         default_factory=lambda: {

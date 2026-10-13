@@ -108,7 +108,6 @@ class ChannelMessageRow:
     text: str
     ts: float
     is_bot: bool
-    media: str = ""
 
 
 def parse_umo(umo: str) -> tuple[str, str, str]:
@@ -625,21 +624,10 @@ class IrmiaStore:
             clauses.append("id>?")
             params.append(int(after_id))
         where_sql = " AND ".join(clauses)
-        # media 列只有 AstrHe 的 messages 表有（fallback_messages 走同名字段，老库可能没有）
-        has_media = True
-        try:
-            cols = {
-                str(r[1])
-                for r in db_conn.execute(f"PRAGMA table_info({table})").fetchall()
-            }
-            has_media = "media" in cols
-        except Exception:
-            has_media = False
-        media_col = ", media" if has_media else ", '' AS media"
         sql = (
             f"SELECT id, umo, platform_id, message_type, session_id, "
             f"platform_message_id, sender_id, sender_name, sender_card, "
-            f"text, ts, is_bot{media_col} "
+            f"text, ts, is_bot "
             f"FROM {table} WHERE {where_sql} ORDER BY id DESC LIMIT ?"
         )
         params.append(int(limit))
@@ -658,7 +646,6 @@ class IrmiaStore:
                 text=str(r["text"] or ""),
                 ts=float(r["ts"] or 0.0),
                 is_bot=bool(r["is_bot"]),
-                media=str(r["media"] or ""),
             )
             for r in reversed(rows)
         ]
@@ -702,26 +689,31 @@ class IrmiaStore:
                     )
         return result
 
-    def update_message_text(self, msg_id: int, text: str) -> bool:
-        """按行 id 覆盖账本某条消息的 text（话题概括补完图片描述后回写）。
-
-        AstrHe 那份连接是只读打开的，所以这里单独开一条可写连接；
-        失败只返回 False，不抛异常，回写是 best-effort 的。
-        """
-        if not self.astrhe_db_path or not Path(self.astrhe_db_path).is_file():
-            return False
-        try:
-            conn = sqlite3.connect(str(self.astrhe_db_path), timeout=5.0)
-            try:
-                cur = conn.execute(
-                    "UPDATE messages SET text=? WHERE id=?", (str(text), int(msg_id))
-                )
-                conn.commit()
-                return bool(cur.rowcount)
-            finally:
-                conn.close()
-        except Exception:
-            return False
+    def get_message(self, umo: str, msg_id: int) -> ChannelMessageRow | None:
+        """按会话和行号从同一账本来源查询消息，不混用两张表的编号。"""
+        conn, table = self._select_source_for_umo(umo)
+        row = conn.execute(
+            f"SELECT id, umo, platform_id, message_type, session_id, platform_message_id, "
+            f"sender_id, sender_name, sender_card, text, ts, is_bot FROM {table} "
+            "WHERE umo=? AND id=? AND recalled=0",
+            (umo, msg_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return ChannelMessageRow(
+            id=int(row["id"]),
+            umo=str(row["umo"]),
+            platform_id=str(row["platform_id"] or ""),
+            message_type=str(row["message_type"] or ""),
+            session_id=str(row["session_id"] or ""),
+            platform_message_id=str(row["platform_message_id"] or ""),
+            sender_id=str(row["sender_id"] or ""),
+            sender_name=str(row["sender_name"] or ""),
+            sender_card=str(row["sender_card"] or ""),
+            text=str(row["text"] or ""),
+            ts=float(row["ts"] or 0.0),
+            is_bot=bool(row["is_bot"]),
+        )
 
     def has_unseen_bot_speech(self, umo: str) -> bool:
         """判断该会话是否有尚未被 read_channel 核对展示过的 Bot 自身发言。"""

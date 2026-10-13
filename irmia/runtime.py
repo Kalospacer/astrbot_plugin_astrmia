@@ -16,6 +16,7 @@ from .config import IrmiaConfig, is_in_quiet_window, load_irmia_config
 from .heartbeat import HeartbeatEngine, HeartbeatFiring
 from .inbox import GroupBatcher, evaluate_channel_message
 from .read_channel_tool import ReadChannelTool, execute_read_channel
+from .read_image_tool import READ_IMAGE_DESCRIPTION, ReadImageTool, execute_read_image
 from .render import (
     SELF_BRIEF_HEADER,
     build_self_brief,
@@ -28,8 +29,9 @@ from .render import (
 )
 from .store import IrmiaStore, parse_umo
 from .topic import TopicSummarizer
-from .vision import VisionCache, is_image_path
-from .vision_tool import LookImageTool, describe_single_image
+from .vision import VisionStore
+from .vision_describe import Captioner
+from .vision_keep import keep_event_images
 from .wake_summary import build_wake_material, summarize_wake
 
 try:
@@ -190,8 +192,13 @@ class IrmiaRuntime:
         self.store = IrmiaStore(resolved_dir, astrhe_db_path=astrhe_db_path)
         self.batcher = GroupBatcher()
         self.topic_summarizer = TopicSummarizer(self.store, context, logger)
-        # 识图缓存：内置在 IRMIA 里，不再依赖 astrbot_plugin_irmia_vision
-        self.vision_cache = VisionCache()
+        self.vision_store = VisionStore(
+            self.store.data_dir / "vision.db", self.store.data_dir / "kept_images"
+        )
+        self.captioner = Captioner(
+            self.vision_store, self._vision_providers, self.cfg, self._spawn_bg, logger
+        )
+        self.topic_summarizer.captioner = self.captioner
 
         cfg = load_irmia_config(self._raw_config)
         self.heartbeat = HeartbeatEngine(
@@ -215,8 +222,8 @@ class IrmiaRuntime:
         self._tools_registered = False
         # 夜间静默窗口状态：记住上一拍是否在窗口内，用来在出窗口时把心率计时归零
         self._was_in_quiet = False
-        # 上次清理识图缓存的时间戳，避免每拍都去扫表
-        self._last_vision_cleanup = 0.0
+        # 留底和描述缓存每小时清理一次，不依赖心跳唤醒开关。
+        self._vision_cleanup_at = 0.0
         self._install_send_message_patch()
 
     def cfg(self) -> IrmiaConfig:
@@ -255,7 +262,8 @@ class IrmiaRuntime:
         self._auto_master_umo = (
             await self.store.get_kv("auto_master_umo", "")
         ).strip()
-        self._init_vision_cache()
+        await asyncio.to_thread(self.vision_store.open)
+        await self._maybe_cleanup_vision(self.cfg())
         self._register_tools()
         self._start_heartbeat_loop()
         dist = self.heartbeat.distribution()
@@ -264,22 +272,15 @@ class IrmiaRuntime:
             f"目标均值 {dist.mean_ms / 60000:.2f}m (alpha={dist.alpha:.4f})"
         )
 
-    def _init_vision_cache(self) -> None:
-        """打开识图缓存，并在启动时清一次过期记录（best-effort）。"""
+    async def _vision_providers(self, umo: str) -> list[Any]:
+        """按识图降级链解析模型，未配置时复用轻量模型及会话默认模型。"""
         cfg = self.cfg()
-        try:
-            if cfg.vision_cache_db:
-                self.vision_cache = VisionCache(cfg.vision_cache_db)
-            self.vision_cache.open()
-            self.topic_summarizer.vision_cache = self.vision_cache
-            removed = self.vision_cache.cleanup_expired(cfg.vision_cache_ttl_days)
-            if removed:
-                self.logger.info(
-                    f"[IRMIA] 启动时清理过期识图缓存 {removed} 条"
-                    f"（TTL {cfg.vision_cache_ttl_days} 天）"
-                )
-        except Exception as exc:
-            self.logger.warning(f"[IRMIA] 识图缓存初始化失败: {exc!r}")
+        providers = []
+        for provider_id in cfg.vision_provider_ids or [cfg.light_provider_id]:
+            provider = await self.topic_summarizer.resolve_provider(umo, provider_id)
+            if provider is not None:
+                providers.append(provider)
+        return providers
 
     async def terminate(self) -> None:
         """停止心跳循环、等待后台任务收尾并关闭存储。"""
@@ -296,12 +297,14 @@ class IrmiaRuntime:
             t.cancel()
         if self._bg_tasks:
             await asyncio.gather(*self._bg_tasks, return_exceptions=True)
+        await asyncio.to_thread(self.vision_store.close)
         await self.store.close()
 
-    def _spawn_bg(self, coro: Any) -> None:
+    def _spawn_bg(self, coro: Any) -> asyncio.Task[Any]:
         task = asyncio.create_task(coro)
         self._bg_tasks.add(task)
         task.add_done_callback(self._bg_tasks.discard)
+        return task
 
     def _register_tools(self) -> None:
         if self._tools_registered:
@@ -312,34 +315,32 @@ class IrmiaRuntime:
         try:
             add_llm_tools(
                 ReadChannelTool(handler_fn=self._handle_read_channel_tool),
-                # 识图能力内置在 IRMIA 里了，主脑 read_channel 之后想看哪张图直接调这个
-                LookImageTool(handler_fn=self._handle_look_image_tool),
+                # 群聊消息里的图片用 read_image 看。
+                ReadImageTool(
+                    handler_fn=self._handle_read_image_tool,
+                    description=READ_IMAGE_DESCRIPTION.format(
+                        keep_days=self.cfg().image_keep_days
+                    ),
+                ),
             )
             self._tools_registered = True
         except Exception as exc:
             self.logger.warning(f"[IRMIA] 注册工具失败: {exc}")
 
-    async def _handle_look_image_tool(
+    async def _handle_read_image_tool(
         self, run_context: Any, **kwargs: Any
     ) -> str:
-        """look_image 工具回调：读图 + 查缓存 + 未命中现调 VL，结果一并写回缓存。"""
+        """按会话与聊天行编号看图，不接收临时图片路径。"""
         cfg = self.cfg()
-        path = str(kwargs.get("path") or "").strip()
-        question = str(kwargs.get("question") or "").strip()
-        provider = await self.topic_summarizer.resolve_provider(
-            str(getattr(self._last_active_event, "unified_msg_origin", "") or ""),
-            cfg.light_provider_id,
-        )
-        return await describe_single_image(
-            self.topic_summarizer.vision_cache,
-            provider,
-            path,
-            question=question,
-            model_id=cfg.light_provider_id or "unknown",
-            ttl_days=cfg.vision_cache_ttl_days,
-            timeout_sec=cfg.light_timeout_sec,
-            max_chars=max(60, cfg.topic_line_max_chars),
-            logger=self.logger,
+        return await execute_read_image(
+            store=self.store,
+            vstore=self.vision_store,
+            captioner=self.captioner,
+            sid=str(kwargs.get("sid") or "").strip(),
+            msg_id=int(kwargs["msg_id"]),
+            index=int(kwargs.get("index", 1)),
+            question=str(kwargs.get("question") or "").strip(),
+            keep_days=cfg.image_keep_days,
         )
 
     async def _handle_read_channel_tool(
@@ -371,8 +372,9 @@ class IrmiaRuntime:
             called_sid_this_turn=called_sid,
             tz_name=self.tz_name(),
             repeat_counter=repeat_reads,
-            vision_cache=self.vision_cache,
-            vision_cache_ttl_days=cfg.vision_cache_ttl_days,
+            captioner=self.captioner if cfg.read_channel_image_enabled else None,
+            caption_wait_sec=cfg.read_channel_image_wait_sec,
+            caption_max_new=cfg.read_channel_image_max,
         )
 
     async def _record_bot_speech(self, umo: str, text: str) -> None:
@@ -515,6 +517,9 @@ class IrmiaRuntime:
             is_bot=False,
             group_name=group_name,
         )
+
+        if cfg.image_keep_days > 0 and msg_id:
+            await keep_event_images(event, umo, msg_id, self.vision_store, self.logger)
 
         # 若命中了已注册的插件指令（handlers_parsed_params 非空），直接放行给命令处理器
         raw_str = str(getattr(event, "message_str", "") or "").strip()
@@ -964,44 +969,29 @@ class IrmiaRuntime:
             cfg.heartbeat_quiet_end_hour,
         )
 
-    def _vision_cache_note(self, cfg: IrmiaConfig) -> str:
-        """生成状态摘要里那行识图缓存说明。"""
-        try:
-            count = self.vision_cache.count()
-        except Exception:
-            count = -1
+    async def _vision_cache_note(self, cfg: IrmiaConfig) -> str:
+        """在线程池查询留底和描述缓存数量，生成状态说明。"""
+        kept, desc = await asyncio.to_thread(self.vision_store.stats)
         ttl = (
-            f"TTL {cfg.vision_cache_ttl_days} 天"
+            f"未使用 {cfg.vision_cache_ttl_days} 天后清理"
             if cfg.vision_cache_ttl_days > 0
             else "不过期"
         )
-        state = "已开启" if cfg.topic_image_caption_enabled else "话题概括时不识图"
-        path = str(self.vision_cache.db_path)
-        return f"{state}，{count} 条，{ttl}（{path}）"
+        return f"留底 {kept} 张（保留 {cfg.image_keep_days} 天），描述缓存 {desc} 条（{ttl}）"
 
-    async def _maybe_cleanup_vision_cache(self, cfg: IrmiaConfig) -> None:
-        """每小时最多清一次过期的识图缓存（挂心跳循环的顺风车，失败无所谓）。
-
-        之所以按小时而不是按天：心跳 tick 是分钟级的，算个时间戳判断开销可以忽略，
-        真正跑清理才会扫表。
-        """
-        if cfg.vision_cache_ttl_days <= 0:
-            return
+    async def _maybe_cleanup_vision(self, cfg: IrmiaConfig) -> None:
+        """启动及每小时清理 Mia 自己的留底图和描述缓存。"""
         now = time.time()
-        if now - self._last_vision_cleanup < 3600:
+        if now - self._vision_cleanup_at < 3600:
             return
-        self._last_vision_cleanup = now
-        try:
-            removed = await asyncio.to_thread(
-                self.vision_cache.cleanup_expired, cfg.vision_cache_ttl_days
+        removed = await asyncio.to_thread(
+            self.vision_store.cleanup, cfg.image_keep_days, cfg.vision_cache_ttl_days
+        )
+        self._vision_cleanup_at = now
+        if any(removed):
+            self.logger.info(
+                f"[IRMIA] 清理留底行 {removed[0]} 条、图片 {removed[1]} 张、描述 {removed[2]} 条"
             )
-            if removed:
-                self.logger.info(
-                    f"[IRMIA] 定时清理过期识图缓存 {removed} 条"
-                    f"（TTL {cfg.vision_cache_ttl_days} 天）"
-                )
-        except Exception as exc:
-            self.logger.debug(f"[IRMIA] 清理识图缓存跳过: {exc!r}")
 
     def quiet_window_note(self, cfg: IrmiaConfig) -> str:
         """生成状态摘要里那行静默窗口说明。"""
@@ -1016,10 +1006,11 @@ class IrmiaRuntime:
 
     async def _heartbeat_tick(self) -> None:
         cfg = self.cfg()
-        if not cfg.enabled or not cfg.heartbeat_enabled:
+        if not cfg.enabled:
             return
-        # 每小时一次顺手清理过期识图缓存（不单独起定时任务，搭心跳的顺风车）
-        await self._maybe_cleanup_vision_cache(cfg)
+        await self._maybe_cleanup_vision(cfg)
+        if not cfg.heartbeat_enabled:
+            return
         # 正在和人聊（主脑锁被占用）或尚未绑定主脑时跳过，不推进抽签周期
         if self._brain_lock.locked() or not await self.resolve_master_umo():
             return
@@ -1261,7 +1252,7 @@ class IrmiaRuntime:
             f"（区间 {dist.floor_ms / 60000:.0f}~{dist.ceil_ms / 60000:.0f}m · "
             f"目标均值 {dist.mean_ms / 60000:.1f}m · α={dist.alpha:.4f}）",
             self.quiet_window_note(cfg),
-            f"识图缓存：{self._vision_cache_note(cfg)}",
+            f"识图缓存：{await self._vision_cache_note(cfg)}",
             f"当前安静时长：{quiet_min:.1f} 分钟（下一拍抽中概率 p={cur_p:.3f}，连续空拍={self.heartbeat.idle_ticks}）",
             f"已知外部会话数：{len(sessions)}",
         ]

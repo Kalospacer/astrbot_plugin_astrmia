@@ -1,1 +1,2 @@
-# 本插件仅依赖 Python 标准库与 AstrBot 核心运行时环境
+# 图片缩小留底使用 Pillow，其余依赖由 AstrBot 核心提供
+Pillow>=9.1
