@@ -212,3 +212,76 @@ def test_render_mention_notice_and_session_list(tmp_path: Path) -> None:
         await store.close()
 
     asyncio.run(_run())
+
+
+def test_read_channel_vision_cache_enrichment(tmp_path: Path) -> None:
+    """验证 read_channel 构造 body 时实时查询 vision_cache 替换 [图片] 为 [图片: 描述]，未命中保持原样。"""
+    import sqlite3
+    from irmia.vision import VisionCache
+
+    async def _run() -> None:
+        astrhe_db = tmp_path / "astrhe.db"
+        conn = sqlite3.connect(str(astrhe_db))
+        conn.executescript(
+            """
+            CREATE TABLE messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                umo TEXT NOT NULL,
+                platform_id TEXT NOT NULL DEFAULT '',
+                message_type TEXT NOT NULL DEFAULT '',
+                session_id TEXT NOT NULL DEFAULT '',
+                platform_message_id TEXT NOT NULL DEFAULT '',
+                sender_id TEXT NOT NULL DEFAULT '',
+                sender_name TEXT NOT NULL DEFAULT '',
+                sender_card TEXT NOT NULL DEFAULT '',
+                text TEXT NOT NULL DEFAULT '',
+                ts REAL NOT NULL DEFAULT 0,
+                is_bot INTEGER NOT NULL DEFAULT 0,
+                recalled INTEGER NOT NULL DEFAULT 0,
+                media TEXT NOT NULL DEFAULT ''
+            );
+            """
+        )
+        umo = "napcat:GroupMessage:904527240"
+        img_hit = str(tmp_path / "cat.jpg")
+        img_miss = str(tmp_path / "unknown.jpg")
+        conn.execute(
+            "INSERT INTO messages (umo, platform_id, message_type, session_id, sender_id, sender_name, text, ts, is_bot, media) "
+            "VALUES (?, 'napcat', 'GroupMessage', '904527240', '1001', 'Kalo', '[图片][猫雷]', 1700000001.0, 0, ?)",
+            (umo, f'["{img_hit}"]'),
+        )
+        conn.execute(
+            "INSERT INTO messages (umo, platform_id, message_type, session_id, sender_id, sender_name, text, ts, is_bot, media) "
+            "VALUES (?, 'napcat', 'GroupMessage', '904527240', '1002', '彼岸', '[图片]', 1700000002.0, 0, ?)",
+            (umo, f'["{img_miss}"]'),
+        )
+        conn.commit()
+        conn.close()
+
+        vcache = VisionCache(tmp_path / "vision_cache.db")
+        vcache.open()
+        vcache.insert(
+            path=img_hit,
+            sha256="deadbeef",
+            filename="cat.jpg",
+            dhash="f0f0f0f0f0f0f0f0",
+            model_id="test",
+            summary="白发猫耳Q版角色半埋在泥土里",
+            text="白发猫耳Q版角色半埋在泥土里",
+        )
+
+        store = IrmiaStore(tmp_path / "irmia_vcache", astrhe_db_path=astrhe_db)
+        await store.open()
+        out = await execute_read_channel(
+            store=store,
+            sid=umo,
+            limit=20,
+            vision_cache=vcache,
+            vision_cache_ttl_days=7,
+        )
+        assert "[图片: 白发猫耳Q版角色半埋在泥土里][猫雷]" in out
+        assert "彼岸: [图片]" in out
+        await store.close()
+        vcache.close()
+
+    asyncio.run(_run())

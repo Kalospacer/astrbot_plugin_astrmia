@@ -72,6 +72,42 @@
     "default": 15,
     "hint": "期望平均多少分钟自然醒来一次（需介于 floor 与 ceil 之间，启动时自动通过 200 步二分法反解形状指数 alpha）。"
   },
+  "heartbeat_quiet_enabled": {
+    "description": "夜间静默（模拟睡觉，暂停心跳）",
+    "type": "bool",
+    "default": false,
+    "hint": "开启后，静默时段内完全不抽签、不唤醒，像睡着了一样；进出窗口时会把心率计时归零，出窗口后按正常节奏重新呼吸，不会一睁眼就蹦起来。默认关闭，保持原有全天心跳行为。"
+  },
+  "heartbeat_quiet_start_hour": {
+    "description": "静默开始时刻（整点，0-23）",
+    "type": "int",
+    "default": 22,
+    "hint": "本地时区的小时数，取 AstrBot 配置的 timezone。22 表示晚上 22:00 开始静默。"
+  },
+  "heartbeat_quiet_end_hour": {
+    "description": "静默结束时刻（整点，0-23）",
+    "type": "int",
+    "default": 8,
+    "hint": "开始大于结束表示跨零点，例如 22 到 8 覆盖 22:00 至次日 08:00。两个值相同视为不静默。"
+  },
+  "topic_image_caption_enabled": {
+    "description": "话题概括时顺手识别窗口里的图片",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后，点名唤醒做话题概括时会取最近 25 条窗口里带图的消息，查缓存补描述、查不到的调一次轻量模型识图，描述同时写回账本，read_channel 之后就能看到图里写了什么。关掉就只概括文字。"
+  },
+  "vision_cache_ttl_days": {
+    "description": "识图缓存过期天数",
+    "type": "int",
+    "default": 7,
+    "hint": "图片描述缓存超过这个天数就会被清理。启动时清一次，之后每小时搭心跳的顺风车清一次。填 0 表示不过期。识图能力已内置到 IRMIA，不再依赖 astrbot_plugin_irmia_vision 插件。"
+  },
+  "vision_cache_db": {
+    "description": "识图缓存数据库路径（留空用默认）",
+    "type": "string",
+    "default": "",
+    "hint": "留空时用 /AstrBot/data/plugin_data/astrbot_plugin_irmia_vision/vision_cache.db，沿用原插件的缓存文件，历史记录直接可用。"
+  },
   "intercept_direct_reply": {
     "description": "工具已发到当前窗口时收起末尾回复",
     "type": "bool",

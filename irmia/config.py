@@ -40,7 +40,13 @@ class IrmiaConfig:
     heartbeat_floor_min: int = 5
     heartbeat_ceil_min: int = 60
     heartbeat_target_mean_min: int = 15
+    heartbeat_quiet_enabled: bool = False
+    heartbeat_quiet_start_hour: int = 22
+    heartbeat_quiet_end_hour: int = 8
     intercept_direct_reply: bool = False
+    topic_image_caption_enabled: bool = True
+    vision_cache_ttl_days: int = 7
+    vision_cache_db: str = ""
     topic_max_chars: int = 24
     topic_context_messages: int = 25
     topic_line_max_chars: int = 120
@@ -94,6 +100,42 @@ def normalize_heartbeat_mins(
     return f_min, c_min, t_min
 
 
+def normalize_hour(value: Any, default: int = 0) -> int:
+    """把小时值规整到 0~23；非法值回默认，越界值按 24 取模。"""
+    if isinstance(value, bool):
+        return default
+    try:
+        hour = int(value)
+    except (TypeError, ValueError):
+        return default
+    return hour % 24
+
+
+def is_in_quiet_window(current_hour: int, start_hour: int, end_hour: int) -> bool:
+    """判断当前小时是否落在静默窗口内（左闭右开）。
+
+    支持跨零点：start > end 表示「今晚 start 点到次日 end 点」，
+    例如 (22, 8) 覆盖 22:00~23:59 与 00:00~07:59。
+    start == end 视为空窗口，全天不静默。
+
+    Args:
+        current_hour: 当前小时（0~23，超出范围按 24 取模）。
+        start_hour: 窗口开始小时。
+        end_hour: 窗口结束小时。
+
+    Returns:
+        在窗口内返回 True，否则 False。
+    """
+    cur = int(current_hour) % 24
+    start = int(start_hour) % 24
+    end = int(end_hour) % 24
+    if start == end:
+        return False
+    if start < end:
+        return start <= cur < end
+    return cur >= start or cur < end
+
+
 def load_irmia_config(raw: dict[str, Any] | None) -> IrmiaConfig:
     """从插件原始配置字典生成安全的 IrmiaConfig 对象，支持热读取。
 
@@ -143,7 +185,19 @@ def load_irmia_config(raw: dict[str, Any] | None) -> IrmiaConfig:
         heartbeat_floor_min=floor_min,
         heartbeat_ceil_min=ceil_min,
         heartbeat_target_mean_min=target_mean,
+        heartbeat_quiet_enabled=bool(cfg.get("heartbeat_quiet_enabled", False)),
+        heartbeat_quiet_start_hour=normalize_hour(
+            cfg.get("heartbeat_quiet_start_hour", 22), 22
+        ),
+        heartbeat_quiet_end_hour=normalize_hour(
+            cfg.get("heartbeat_quiet_end_hour", 8), 8
+        ),
         intercept_direct_reply=bool(cfg.get("intercept_direct_reply", False)),
+        topic_image_caption_enabled=bool(
+            cfg.get("topic_image_caption_enabled", True)
+        ),
+        vision_cache_ttl_days=_int("vision_cache_ttl_days", 7, minimum=0),
+        vision_cache_db=str(cfg.get("vision_cache_db", "") or "").strip(),
         topic_max_chars=_group_int("topic_options", "max_chars", 24),
         topic_context_messages=_group_int("topic_options", "context_messages", 25),
         topic_line_max_chars=_group_int("topic_options", "line_max_chars", 120),

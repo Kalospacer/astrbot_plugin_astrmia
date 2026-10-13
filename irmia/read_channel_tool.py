@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import Any, Callable, Sequence
 
@@ -11,6 +12,14 @@ from pydantic.dataclasses import dataclass as pydantic_dataclass
 from .inbox import mentions_keyword
 from .render import format_short_time
 from .store import ChannelMessageRow, IrmiaStore, parse_umo
+from .topic import _parse_media_refs
+from .vision import (
+    VisionCache,
+    compute_dhash,
+    is_image_path,
+    replace_bare_placeholder,
+    sha256_of_file,
+)
 
 try:
     from astrbot.api import FunctionTool
@@ -103,6 +112,49 @@ def _paging_footer(
     return "—— 已经是这个会话最早的记录了。"
 
 
+def _enrich_body_from_cache(
+    text: str,
+    media: str,
+    cache: VisionCache | None,
+    ttl_days: int = 7,
+) -> str:
+    """若 text 含裸 `[图片]` 且 media 有图片引用，只查 vision_cache（含 dHash 判重）补上描述。
+
+    只查缓存、绝不调模型，单条失败静默跳过，开销接近零。
+    """
+    if not text or "[图片]" not in text or not media or cache is None:
+        return text
+    refs = _parse_media_refs(media)
+    if not refs:
+        return text
+    if not cache.open_safe():
+        return text
+    updated = text
+    for ref in refs:
+        if "[图片]" not in updated:
+            break
+        try:
+            has_file = is_image_path(ref)
+            sha = sha256_of_file(ref) if has_file else ""
+            dhash = compute_dhash(ref) if has_file else ""
+            hit = cache.find(
+                path=ref,
+                sha256=sha,
+                filename=os.path.basename(ref),
+                dhash=dhash,
+                ttl_days=ttl_days,
+            )
+            if hit is not None:
+                desc = (hit.summary or hit.text).strip()
+                if desc:
+                    replaced = replace_bare_placeholder(updated, desc)
+                    if replaced:
+                        updated = replaced
+        except Exception:
+            continue
+    return updated
+
+
 async def execute_read_channel(
     *,
     store: IrmiaStore,
@@ -115,6 +167,8 @@ async def execute_read_channel(
     called_sid_this_turn: str | None = None,
     tz_name: str = "Asia/Shanghai",
     repeat_counter: dict[str, int] | None = None,
+    vision_cache: VisionCache | None = None,
+    vision_cache_ttl_days: int = 7,
 ) -> str:
     """执行 read_channel 核心逻辑（纯业务函数，便于直接单测与工具调用）。"""
     target_sid = str(sid or "").strip()
@@ -148,6 +202,7 @@ async def execute_read_channel(
         rows: Sequence[ChannelMessageRow], mentioned_set: set[int]
     ) -> list[str]:
         lines: list[str] = []
+        eff_cache: VisionCache | None = vision_cache
         for r in rows:
             stamp = format_short_time(r.ts, tz_name)
             who = (
@@ -162,7 +217,14 @@ async def execute_read_channel(
                 if ((not r.is_bot) and r.id in mentioned_set)
                 else ""
             )
-            body = (r.text or "").replace("\r\n", "\n").strip() or "[空消息]"
+            raw_text = (r.text or "").replace("\r\n", "\n").strip()
+            if raw_text and "[图片]" in raw_text and getattr(r, "media", ""):
+                if eff_cache is None:
+                    eff_cache = VisionCache()
+                raw_text = _enrich_body_from_cache(
+                    raw_text, r.media, eff_cache, vision_cache_ttl_days
+                )
+            body = raw_text or "[空消息]"
             lines.append(f"{prefix}[{stamp} #{r.id}] {who}: {body}")
         return lines
 
