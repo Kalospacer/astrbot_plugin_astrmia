@@ -66,6 +66,13 @@
     "default": true,
     "hint": "没人说话时，按随安静时长递增的概率曲线（p = q^alpha）每隔一个抽签间隔抽签一次自然醒来，查看未读信箱与今日待办，自主决定是否找人说话。需要先绑定全局主脑会话才会运行。"
   },
+  "heartbeat_provider_id": {
+    "description": "心跳思考与调工具使用的模型 Provider",
+    "type": "string",
+    "default": "",
+    "_special": "select_provider",
+    "hint": "呼吸心跳与手动 /astrmia wake 自己醒来思考、调工具（read_channel / 发消息 / 派管家）时用的模型。留空则跟随全局主脑会话的聊天模型；所填模型被删除时自动回退主脑模型并打日志。心跳末尾的 [IRMIA Wake] 小结仍走 light_provider_id 轻量模型，不受此项影响。"
+  },
   "heartbeat_floor_min": {
     "description": "心跳安静下限 floor（分钟）",
     "type": "int",

@@ -39,6 +39,7 @@ class IrmiaConfig:
     topic_min_unread: int = 5
     topic_cooldown_sec: int = 180
     heartbeat_enabled: bool = True
+    heartbeat_provider_id: str = ""
     heartbeat_floor_min: int = 5
     heartbeat_ceil_min: int = 60
     heartbeat_target_mean_min: int = 15
@@ -193,6 +194,7 @@ def load_irmia_config(raw: dict[str, Any] | None) -> IrmiaConfig:
         topic_min_unread=_int("topic_min_unread", 5, minimum=1),
         topic_cooldown_sec=_int("topic_cooldown_sec", 180),
         heartbeat_enabled=bool(cfg.get("heartbeat_enabled", True)),
+        heartbeat_provider_id=str(cfg.get("heartbeat_provider_id", "") or "").strip(),
         heartbeat_floor_min=floor_min,
         heartbeat_ceil_min=ceil_min,
         heartbeat_target_mean_min=target_mean,

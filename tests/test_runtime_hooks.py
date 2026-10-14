@@ -137,9 +137,15 @@ class FakeContext:
         self.conversation_manager = FakeConvManager()
         self.registered_tools: list[Any] = []
         self.sent_messages: list[tuple[str, Any]] = []
+        self.provider_ids: set[str] = {"CPA2/hb-test"}
 
     def get_config(self, umo: str | None = None) -> dict[str, Any]:
         return {"timezone": "Asia/Shanghai", "admins_id": ["114514"]}
+
+    def get_provider_by_id(self, pid: str) -> Any:
+        if pid in self.provider_ids:
+            return object()
+        return None
 
     def add_llm_tools(self, *tools: Any) -> None:
         self.registered_tools.extend(tools)
@@ -170,6 +176,7 @@ def test_runtime_end_to_end_flow(tmp_path: Path) -> None:
             "contacts_map": ["114514 = 哥哥"],
             "group_batch_window_sec": 0,
             "intercept_direct_reply": False,
+            "heartbeat_provider_id": "CPA2/hb-test",
         }
         rt = IrmiaRuntime(
             context=ctx,

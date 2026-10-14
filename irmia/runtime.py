@@ -1108,6 +1108,13 @@ class IrmiaRuntime:
             extras={"irmia_wake": True},
             message_type=session.message_type,
         )
+        if cfg.heartbeat_provider_id:
+            if self.context.get_provider_by_id(cfg.heartbeat_provider_id) is not None:
+                wake_event.set_extra("selected_provider", cfg.heartbeat_provider_id)
+            else:
+                self.logger.warning(
+                    f"[IRMIA] 配置的心跳模型 {cfg.heartbeat_provider_id} 不存在，本次唤醒回退主脑默认模型"
+                )
 
         cfg_dict = self.context.get_config(umo=wake_event.unified_msg_origin)
         provider_settings = cfg_dict.get("provider_settings", {}) or {}
