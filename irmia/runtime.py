@@ -1095,11 +1095,18 @@ class IrmiaRuntime:
         cfg = self.cfg()
         session = MessageSession.from_str(master_umo)
 
-        prompt_text = (
-            render_heartbeat_prompt(firing)
-            if firing is not None
-            else f"[手动唤醒] {manual_note or '管理员让你醒来看看会话清单和待办。'}"
-        )
+        if firing is not None:
+            prompt_text = render_heartbeat_prompt(
+                cfg.heartbeat_prompt, firing.quiet_seconds, firing.idle_ticks
+            )
+        elif manual_note:
+            prompt_text = f"[手动唤醒] {manual_note}"
+        else:
+            prompt_text = render_heartbeat_prompt(
+                cfg.heartbeat_prompt,
+                self.heartbeat.quiet_ms() / 1000.0,
+                self.heartbeat.idle_ticks,
+            )
 
         wake_event = HeartbeatWakeEvent(
             context=self.context,

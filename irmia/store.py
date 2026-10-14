@@ -663,7 +663,9 @@ class IrmiaStore:
                 if wall_now - recorded_at >= 60.0:
                     continue
                 already = any(
-                    m.is_bot and m.text == sp_text and abs(m.ts - sp_ts) < 10.0
+                    m.is_bot
+                    and "".join(sp_text.split()) in "".join(m.text.split())
+                    and abs(m.ts - sp_ts) < 10.0
                     for m in result
                 )
                 if not already:
