@@ -6,7 +6,6 @@ from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Sequence
 from zoneinfo import ZoneInfo
 
-from .heartbeat import HeartbeatFiring
 from .store import SessionSummary, parse_umo
 
 SELF_BRIEF_HEADER = "=== [IRMIA] 你现在的处境 ==="
@@ -222,14 +221,9 @@ def render_mention_notice_with_digest(
     )
 
 
-def render_heartbeat_prompt(firing: HeartbeatFiring) -> str:
-    """生成呼吸心跳唤醒时的主脑输入提示。"""
-    quiet_min = round(firing.quiet_seconds / 60.0, 1)
-    return (
-        f"[心跳] 外面已经安静了 {quiet_min} 分钟，没有人在叫你。"
-        f"这是连续第 {firing.idle_ticks} 次自己醒来，中间没人找过你。\n"
-        "可以看看下面的会话清单和今天的待办：\n"
-        "- 想看哪个会话就用 read_channel(sid=...)。\n"
-        "- 想找人说话就用 send_message_to_user(session=..., messages=...)。\n"
-        "- 没什么要做的就直接结束，不用硬找话说。"
+def render_heartbeat_prompt(template: str, quiet_seconds: float, idle_ticks: int) -> str:
+    """只替换心跳占位符，保留模板中的其他大括号。"""
+    quiet_min = round(quiet_seconds / 60.0, 1)
+    return template.replace("{quiet_min}", str(quiet_min)).replace(
+        "{idle_ticks}", str(int(idle_ticks))
     )

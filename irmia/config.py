@@ -5,6 +5,17 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+
+DEFAULT_HEARTBEAT_PROMPT = """[心跳] 已经 {quiet_min} 分钟没人私聊你或在群里叫你了，这是这段时间你第 {idle_ticks} 次自己醒来。
+
+趁空下来，打理一下自己的一天：
+1. 对一遍待办和今天的规划（规划不清楚就用 astrhe_read_plan 看全文，待办的备注和日期用 astrhe_read_todos 看）。答应过别人、或者自己说过要做却还没做的事，挑一件现在就能动手的去做，做了就用 astrhe_todo_update 记一笔进展或完成；已经过时、不用再做的，标成放弃。
+2. 想起新的要做的事、聊天里冒出来的约定还没记下，用 astrhe_todo_add 记成待办，挂到用得上它的会话；计划变了就用 astrhe_todo_edit 或 astrhe_plan_edit 改过来。
+3. 现在做不了、得晚点办的事，用 astrhe_schedule 给自己定个时间，到点再醒来处理，别只记在心里。
+4. 看看会话清单，在意的人或群可以用 read_channel 翻一翻，想说话就用 send_message_to_user。
+5. 待办都理过了、眼下也确实没事，就安静结束这一拍，不用为了说话而说话。"""
+
+
 def _coerce_int(
     value: Any,
     *,
@@ -40,6 +51,7 @@ class IrmiaConfig:
     topic_cooldown_sec: int = 180
     heartbeat_enabled: bool = True
     heartbeat_provider_id: str = ""
+    heartbeat_prompt: str = DEFAULT_HEARTBEAT_PROMPT
     heartbeat_floor_min: int = 5
     heartbeat_ceil_min: int = 60
     heartbeat_target_mean_min: int = 15
@@ -195,6 +207,9 @@ def load_irmia_config(raw: dict[str, Any] | None) -> IrmiaConfig:
         topic_cooldown_sec=_int("topic_cooldown_sec", 180),
         heartbeat_enabled=bool(cfg.get("heartbeat_enabled", True)),
         heartbeat_provider_id=str(cfg.get("heartbeat_provider_id", "") or "").strip(),
+        heartbeat_prompt=(
+            str(cfg.get("heartbeat_prompt", "") or "").strip() or DEFAULT_HEARTBEAT_PROMPT
+        ),
         heartbeat_floor_min=floor_min,
         heartbeat_ceil_min=ceil_min,
         heartbeat_target_mean_min=target_mean,
