@@ -114,6 +114,26 @@ def is_internal_silent_event(event: Any) -> bool:
         return False
 
 
+def _collect_event_image_urls(event: Any) -> list[str]:
+    """收集单条事件消息链与 image_urls 属性里出现的全部图片地址（去重）。"""
+    urls: list[str] = []
+    msg_obj = getattr(event, "message_obj", None)
+    for comp in getattr(msg_obj, "message", None) or []:
+        if comp.__class__.__name__ == "Image":
+            u = (
+                getattr(comp, "url", None)
+                or getattr(comp, "file", None)
+                or getattr(comp, "path", None)
+            )
+            if u and str(u) not in urls:
+                urls.append(str(u))
+    if isinstance(getattr(event, "image_urls", None), list):
+        for u in event.image_urls:
+            if u and str(u) not in urls:
+                urls.append(str(u))
+    return urls
+
+
 def extract_event_text_and_at(
     event: Any, quote_preview_chars: int = 40
 ) -> tuple[str, bool, str]:
@@ -539,20 +559,27 @@ class IrmiaRuntime:
             await self.maybe_bind_master_umo(event)
 
             if cfg.private_batch_enabled and cfg.group_batch_window_sec > 0:
-                item = {"text": raw_str or text, "event": event}
+                item = {
+                    "text": raw_str or text,
+                    "images": _collect_event_image_urls(event),
+                }
                 is_leader = await self.batcher.wait_my_turn(
-                    umo, float(cfg.group_batch_window_sec), item=item
+                    umo, cfg.group_batch_window_sec, item=item
                 )
                 if not is_leader:
                     event.stop_event()
                     return
                 batched = self.batcher.pop_batched_items(umo)
-                if not batched:
-                    batched = [item]
-                batched_texts = [b["text"] for b in batched if b and b.get("text")]
-                batched_events = [b["event"] for b in batched if b and b.get("event")]
-                event.set_extra("irmia_batched_private_texts", batched_texts)
-                event.set_extra("irmia_batched_private_events", batched_events)
+                if len(batched) > 1:
+                    texts = [str(b.get("text") or "") for b in batched if b]
+                    texts = [t for t in texts if t.strip()]
+                    event.set_extra("irmia_batched_private_texts", texts)
+                    images: list[str] = []
+                    for b in batched:
+                        for u in (b.get("images") if b else None) or []:
+                            if u and str(u) not in images:
+                                images.append(str(u))
+                    event.set_extra("irmia_batched_private_images", images)
 
             await self.store.mark_session_all_read(umo)
             if cfg.intercept_direct_reply:
@@ -573,7 +600,7 @@ class IrmiaRuntime:
         self.heartbeat.note_activity()
         if cfg.group_batch_enabled and cfg.group_batch_window_sec > 0:
             is_leader = await self.batcher.wait_my_turn(
-                umo, float(cfg.group_batch_window_sec)
+                umo, cfg.group_batch_window_sec
             )
             if not is_leader:
                 event.stop_event()
@@ -702,43 +729,30 @@ class IrmiaRuntime:
                 who = self.store.resolve_person_name(
                     sender_id, sender_name, "", cfg.contacts_map
                 )
-                batched_texts = (
-                    event.get_extra("irmia_batched_private_texts")
-                    if hasattr(event, "get_extra")
-                    else None
-                )
-                if batched_texts and isinstance(batched_texts, list) and len(batched_texts) > 1:
-                    body = "\n".join(str(t) for t in batched_texts if str(t).strip())
+                def _batched_extra(key: str) -> Any:
+                    return (
+                        event.get_extra(key)
+                        if hasattr(event, "get_extra")
+                        else None
+                    )
+
+                batched_texts = _batched_extra("irmia_batched_private_texts")
+                if isinstance(batched_texts, list) and len(batched_texts) > 1:
+                    body = "\n".join(batched_texts)
                 else:
                     body = req.prompt or ""
                 req.prompt = f"[私聊 · {who} · sid {umo}]\n{body}"
 
-                # 合并前序私聊事件中附带的图片到 leader 的 req.image_urls
-                batched_events = (
-                    event.get_extra("irmia_batched_private_events")
-                    if hasattr(event, "get_extra")
-                    else None
-                )
-                if batched_events and isinstance(batched_events, list) and len(batched_events) > 1:
-                    if isinstance(getattr(req, "image_urls", None), list):
-                        curr_imgs = set(req.image_urls)
-                        for ev in batched_events[:-1]:
-                            msg_obj = getattr(ev, "message_obj", None)
-                            for comp in getattr(msg_obj, "message", None) or []:
-                                if comp.__class__.__name__ == "Image":
-                                    u = (
-                                        getattr(comp, "url", None)
-                                        or getattr(comp, "file", None)
-                                        or getattr(comp, "path", None)
-                                    )
-                                    if u and str(u) not in curr_imgs:
-                                        curr_imgs.add(str(u))
-                                        req.image_urls.append(str(u))
-                            if hasattr(ev, "image_urls") and isinstance(ev.image_urls, list):
-                                for u in ev.image_urls:
-                                    if u and str(u) not in curr_imgs:
-                                        curr_imgs.add(str(u))
-                                        req.image_urls.append(str(u))
+                # 合并攒批窗口内全部私聊事件的图片到 leader 的 req.image_urls
+                batched_images = _batched_extra("irmia_batched_private_images")
+                if isinstance(batched_images, list) and isinstance(
+                    getattr(req, "image_urls", None), list
+                ):
+                    curr_imgs = set(req.image_urls)
+                    for u in batched_images:
+                        if u and str(u) not in curr_imgs:
+                            curr_imgs.add(str(u))
+                            req.image_urls.append(str(u))
 
         # 3. 静态 SELF_BRIEF 幂等放入 system_prompt（保护前缀缓存），动态此刻层与工作目录说明放入 extra_user_content_parts
         self_brief = build_self_brief(

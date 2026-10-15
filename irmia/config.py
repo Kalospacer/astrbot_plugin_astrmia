@@ -16,18 +16,19 @@ DEFAULT_HEARTBEAT_PROMPT = """[心跳] 已经 {quiet_min} 分钟没人私聊你�
 5. 待办都理过了、眼下也确实没事，就安静结束这一拍，不用为了说话而说话。"""
 
 
-def _coerce_float(
+def _coerce_number(
     value: Any,
     *,
     default: float,
+    cast: Any = float,
     min_value: float | None = None,
 ) -> float:
-    """安全将配置值转换为浮点数（排除 bool 子类干扰并执行下界保护）。"""
+    """安全将配置值转换为数值（排除 bool 子类干扰并执行下界保护）。"""
     if isinstance(value, bool):
         res = default
     else:
         try:
-            res = float(value)
+            res = cast(value)
         except (TypeError, ValueError):
             res = default
     if min_value is not None and res < min_value:
@@ -42,16 +43,9 @@ def _coerce_int(
     min_value: int | None = None,
 ) -> int:
     """安全将配置值转换为整数（排除 bool 子类干扰并执行下界保护）。"""
-    if isinstance(value, bool):
-        res = default
-    else:
-        try:
-            res = int(value)
-        except (TypeError, ValueError):
-            res = default
-    if min_value is not None and res < min_value:
-        return default if default >= min_value else min_value
-    return res
+    return int(
+        _coerce_number(value, default=default, cast=int, min_value=min_value)
+    )
 
 
 @dataclass
@@ -203,12 +197,9 @@ def load_irmia_config(raw: dict[str, Any] | None) -> IrmiaConfig:
         return _coerce_int(value, default=default, min_value=1)
 
     def _batch_window() -> float:
-        key = (
-            "group_batch_window_sec"
-            if "group_batch_window_sec" in cfg
-            else "batch_window_sec"
+        return _coerce_number(
+            cfg.get("group_batch_window_sec", 3), default=3.0, min_value=0.0
         )
-        return _coerce_float(cfg.get(key, 3), default=3.0, min_value=0.0)
 
     raw_keywords = cfg.get("mention_keywords", [])
     keywords = (

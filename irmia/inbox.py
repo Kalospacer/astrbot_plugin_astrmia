@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Any, Sequence
 
 
 def mentions_keyword(text: str, keywords: Sequence[str]) -> bool:
@@ -103,20 +103,15 @@ class GroupBatcher:
             True 表示窗口结束且没有更新的消息抢占，由当前消息唤醒主脑；
             False 表示等待期间又有新消息到达，当前消息应静默让位。
         """
+        if item is not None:
+            self._items_by_umo.setdefault(umo, []).append(item)
         if window_sec <= 0:
-            if item is not None:
-                self._items_by_umo.setdefault(umo, []).append(item)
             return True
         my_seq = self._seq_by_umo.get(umo, 0) + 1
         self._seq_by_umo[umo] = my_seq
-        if item is not None:
-            self._items_by_umo.setdefault(umo, []).append(item)
         await asyncio.sleep(window_sec)
         return self._seq_by_umo.get(umo, 0) == my_seq
 
     def pop_batched_items(self, umo: str) -> list[Any]:
         """取出并清空该会话当前批次收集的所有载荷。"""
         return self._items_by_umo.pop(umo, [])
-
-
-MessageBatcher = GroupBatcher

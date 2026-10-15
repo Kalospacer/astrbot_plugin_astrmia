@@ -1,6 +1,11 @@
 __pycache__/
-*.pyc
-data/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
 *.db
+*.db-shm
+*.db-wal
+data/
 *.log
 .DS_Store
