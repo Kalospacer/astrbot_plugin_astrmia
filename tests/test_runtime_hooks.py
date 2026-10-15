@@ -330,3 +330,139 @@ def test_runtime_end_to_end_flow(tmp_path: Path) -> None:
         await rt.terminate()
 
     asyncio.run(_run())
+
+
+def test_runtime_batch_debounce_switches(tmp_path: Path) -> None:
+    """验证私聊与群聊防抖攒批独立开关、窗口共用与连续私聊消息完整聚合。"""
+
+    async def _run() -> None:
+        ctx = FakeContext()
+        # 1. 开启私聊防抖与群聊防抖，窗口设置为 0.05 秒以便快速测试
+        cfg = {
+            "enabled": True,
+            "master_umo": "aiocqhttp:FriendMessage:114514",
+            "mention_keywords": ["清漪"],
+            "contacts_map": ["114514 = 哥哥"],
+            "group_batch_enabled": True,
+            "private_batch_enabled": True,
+            "group_batch_window_sec": 0.05,
+            "intercept_direct_reply": False,
+        }
+        rt = IrmiaRuntime(
+            context=ctx,
+            config=cfg,
+            logger=logging.getLogger("irmia_test"),
+            data_dir=tmp_path / "irmia_batch_test",
+        )
+        await rt.initialize()
+
+        priv_umo = "aiocqhttp:FriendMessage:114514"
+
+        # 构造连续两条私聊消息
+        ev1 = FakeEvent(
+            priv_umo,
+            "第一句：帮我想想",
+            private=True,
+            sender_id="114514",
+            sender_name="老哥",
+        )
+        # ev1 模拟带有一张图片
+        class FakeImageComp:
+            def __init__(self, url: str) -> None:
+                self.url = url
+
+        FakeImageComp.__name__ = "Image"
+        ev1.message_obj.message = [FakeImageComp("http://example.com/item1.png")]
+
+        ev2 = FakeEvent(
+            priv_umo,
+            "第二句：都垫点啥",
+            private=True,
+            sender_id="114514",
+            sender_name="老哥",
+        )
+
+        async def _send_ev1():
+            await rt.on_incoming_event(ev1)
+
+        async def _send_ev2():
+            await asyncio.sleep(0.01)
+            await rt.on_incoming_event(ev2)
+
+        await asyncio.gather(_send_ev1(), _send_ev2())
+
+        # ev1 应该被 stop_event 拦截让位
+        assert ev1.stopped is True
+        # ev2 应该作为 leader 放行
+        assert ev2.stopped is False
+
+        # 检查 ev2 进入 on_llm_request 时 prompt 与 image_urls 聚合
+        req = FakeReq(prompt="第二句：都垫点啥")
+        await rt.on_llm_request(ev2, req)
+
+        # 验证提示词中包含全部两句私聊内容
+        assert "第一句：帮我想想" in req.prompt
+        assert "第二句：都垫点啥" in req.prompt
+        assert "[私聊 · 哥哥 · sid aiocqhttp:FriendMessage:114514]" in req.prompt
+        # 验证前序事件的图片被合并到 req.image_urls
+        assert "http://example.com/item1.png" in req.image_urls
+
+        # 2. 测试关闭私聊防抖开关 (private_batch_enabled = False)
+        cfg["private_batch_enabled"] = False
+        ev_no_batch = FakeEvent(
+            priv_umo,
+            "单发不等待",
+            private=True,
+            sender_id="114514",
+            sender_name="老哥",
+        )
+        await rt.on_incoming_event(ev_no_batch)
+        assert ev_no_batch.stopped is False
+
+        # 3. 测试群聊防抖开关开启时，两条连续点名合并
+        cfg["group_batch_enabled"] = True
+        grp_umo = "aiocqhttp:GroupMessage:888888"
+        grp_ev1 = FakeEvent(
+            grp_umo,
+            "清漪1",
+            private=False,
+            at_bot=True,
+            sender_id="114514",
+            sender_name="老哥",
+        )
+        grp_ev2 = FakeEvent(
+            grp_umo,
+            "清漪2",
+            private=False,
+            at_bot=True,
+            sender_id="114514",
+            sender_name="老哥",
+        )
+
+        async def _send_grp1():
+            await rt.on_incoming_event(grp_ev1)
+
+        async def _send_grp2():
+            await asyncio.sleep(0.01)
+            await rt.on_incoming_event(grp_ev2)
+
+        await asyncio.gather(_send_grp1(), _send_grp2())
+        assert grp_ev1.stopped is True
+        assert grp_ev2.stopped is False
+
+        # 4. 测试群聊防抖开关关闭 (group_batch_enabled = False)
+        cfg["group_batch_enabled"] = False
+        grp_ev3 = FakeEvent(
+            grp_umo,
+            "清漪3立即响应",
+            private=False,
+            at_bot=True,
+            sender_id="114514",
+            sender_name="老哥",
+        )
+        await rt.on_incoming_event(grp_ev3)
+        assert grp_ev3.stopped is False
+
+        await rt.terminate()
+
+    asyncio.run(_run())

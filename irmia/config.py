@@ -16,6 +16,25 @@ DEFAULT_HEARTBEAT_PROMPT = """[心跳] 已经 {quiet_min} 分钟没人私聊你�
 5. 待办都理过了、眼下也确实没事，就安静结束这一拍，不用为了说话而说话。"""
 
 
+def _coerce_float(
+    value: Any,
+    *,
+    default: float,
+    min_value: float | None = None,
+) -> float:
+    """安全将配置值转换为浮点数（排除 bool 子类干扰并执行下界保护）。"""
+    if isinstance(value, bool):
+        res = default
+    else:
+        try:
+            res = float(value)
+        except (TypeError, ValueError):
+            res = default
+    if min_value is not None and res < min_value:
+        return default if default >= min_value else min_value
+    return res
+
+
 def _coerce_int(
     value: Any,
     *,
@@ -43,7 +62,9 @@ class IrmiaConfig:
     master_umo: str = ""
     mention_keywords: list[str] = field(default_factory=list)
     contacts_map: dict[str, str] = field(default_factory=dict)
-    group_batch_window_sec: int = 3
+    group_batch_enabled: bool = True
+    private_batch_enabled: bool = True
+    group_batch_window_sec: float = 3.0
     mention_inline_enabled: bool = True
     mention_inline_limit: int = 20
     light_provider_id: str = ""
@@ -181,6 +202,14 @@ def load_irmia_config(raw: dict[str, Any] | None) -> IrmiaConfig:
         value = section.get(key, default) if isinstance(section, dict) else default
         return _coerce_int(value, default=default, min_value=1)
 
+    def _batch_window() -> float:
+        key = (
+            "group_batch_window_sec"
+            if "group_batch_window_sec" in cfg
+            else "batch_window_sec"
+        )
+        return _coerce_float(cfg.get(key, 3), default=3.0, min_value=0.0)
+
     raw_keywords = cfg.get("mention_keywords", [])
     keywords = (
         [str(w).strip() for w in raw_keywords if str(w).strip()]
@@ -199,7 +228,9 @@ def load_irmia_config(raw: dict[str, Any] | None) -> IrmiaConfig:
         master_umo=str(cfg.get("master_umo", "") or "").strip(),
         mention_keywords=keywords,
         contacts_map=parse_contacts_map(cfg.get("contacts_map", [])),
-        group_batch_window_sec=_int("group_batch_window_sec", 3, minimum=0),
+        group_batch_enabled=bool(cfg.get("group_batch_enabled", True)),
+        private_batch_enabled=bool(cfg.get("private_batch_enabled", True)),
+        group_batch_window_sec=_batch_window(),
         mention_inline_enabled=bool(cfg.get("mention_inline_enabled", True)),
         mention_inline_limit=_int("mention_inline_limit", 20, minimum=1),
         light_provider_id=str(cfg.get("light_provider_id", "") or "").strip(),

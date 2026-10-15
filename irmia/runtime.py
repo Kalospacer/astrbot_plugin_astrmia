@@ -537,6 +537,23 @@ class IrmiaRuntime:
         if decision.is_private:
             self.heartbeat.note_activity()
             await self.maybe_bind_master_umo(event)
+
+            if cfg.private_batch_enabled and cfg.group_batch_window_sec > 0:
+                item = {"text": raw_str or text, "event": event}
+                is_leader = await self.batcher.wait_my_turn(
+                    umo, float(cfg.group_batch_window_sec), item=item
+                )
+                if not is_leader:
+                    event.stop_event()
+                    return
+                batched = self.batcher.pop_batched_items(umo)
+                if not batched:
+                    batched = [item]
+                batched_texts = [b["text"] for b in batched if b and b.get("text")]
+                batched_events = [b["event"] for b in batched if b and b.get("event")]
+                event.set_extra("irmia_batched_private_texts", batched_texts)
+                event.set_extra("irmia_batched_private_events", batched_events)
+
             await self.store.mark_session_all_read(umo)
             if cfg.intercept_direct_reply:
                 event.set_extra("enable_streaming", False)
@@ -554,12 +571,13 @@ class IrmiaRuntime:
 
         # 群聊已点名 -> 归零心跳计时，执行防大喘气攒批等待
         self.heartbeat.note_activity()
-        is_leader = await self.batcher.wait_my_turn(
-            umo, float(cfg.group_batch_window_sec)
-        )
-        if not is_leader:
-            event.stop_event()
-            return
+        if cfg.group_batch_enabled and cfg.group_batch_window_sec > 0:
+            is_leader = await self.batcher.wait_my_turn(
+                umo, float(cfg.group_batch_window_sec)
+            )
+            if not is_leader:
+                event.stop_event()
+                return
 
         event.is_wake = True
         event.is_at_or_wake_command = True
@@ -684,7 +702,43 @@ class IrmiaRuntime:
                 who = self.store.resolve_person_name(
                     sender_id, sender_name, "", cfg.contacts_map
                 )
-                req.prompt = f"[私聊 · {who} · sid {umo}]\n{req.prompt or ''}"
+                batched_texts = (
+                    event.get_extra("irmia_batched_private_texts")
+                    if hasattr(event, "get_extra")
+                    else None
+                )
+                if batched_texts and isinstance(batched_texts, list) and len(batched_texts) > 1:
+                    body = "\n".join(str(t) for t in batched_texts if str(t).strip())
+                else:
+                    body = req.prompt or ""
+                req.prompt = f"[私聊 · {who} · sid {umo}]\n{body}"
+
+                # 合并前序私聊事件中附带的图片到 leader 的 req.image_urls
+                batched_events = (
+                    event.get_extra("irmia_batched_private_events")
+                    if hasattr(event, "get_extra")
+                    else None
+                )
+                if batched_events and isinstance(batched_events, list) and len(batched_events) > 1:
+                    if isinstance(getattr(req, "image_urls", None), list):
+                        curr_imgs = set(req.image_urls)
+                        for ev in batched_events[:-1]:
+                            msg_obj = getattr(ev, "message_obj", None)
+                            for comp in getattr(msg_obj, "message", None) or []:
+                                if comp.__class__.__name__ == "Image":
+                                    u = (
+                                        getattr(comp, "url", None)
+                                        or getattr(comp, "file", None)
+                                        or getattr(comp, "path", None)
+                                    )
+                                    if u and str(u) not in curr_imgs:
+                                        curr_imgs.add(str(u))
+                                        req.image_urls.append(str(u))
+                            if hasattr(ev, "image_urls") and isinstance(ev.image_urls, list):
+                                for u in ev.image_urls:
+                                    if u and str(u) not in curr_imgs:
+                                        curr_imgs.add(str(u))
+                                        req.image_urls.append(str(u))
 
         # 3. 静态 SELF_BRIEF 幂等放入 system_prompt（保护前缀缓存），动态此刻层与工作目录说明放入 extra_user_content_parts
         self_brief = build_self_brief(

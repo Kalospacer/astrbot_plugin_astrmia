@@ -78,30 +78,45 @@ def evaluate_channel_message(
 
 
 class GroupBatcher:
-    """群聊点名防大喘气攒批器。
+    """通道消息防大喘气攒批器（群聊点名与私聊共用）。
 
-    当群友连续发送多条 @ 或提及消息时，等待 window_sec 秒：
-    若窗口期内同一群又有新的唤醒消息到达，则前一条让位（返回 False 被拦截入信箱），
-    由窗口期内的最后一条消息统一唤醒主脑。
+    当会话连续发送多条唤醒消息时，等待 window_sec 秒：
+    若窗口期内同一会话又有新的唤醒消息到达，则前一条让位（返回 False 被拦截），
+    由窗口期内的最后一条代表消息统一唤醒主脑，并聚拢该批次内的全部消息内容。
     """
 
     def __init__(self) -> None:
         self._seq_by_umo: dict[str, int] = {}
+        self._items_by_umo: dict[str, list[Any]] = {}
 
-    async def wait_my_turn(self, umo: str, window_sec: float) -> bool:
-        """等待攒批窗口结束，判断当前消息是否仍是该群本批次的最后一条代表。
+    async def wait_my_turn(
+        self, umo: str, window_sec: float, item: Any = None
+    ) -> bool:
+        """等待攒批窗口结束，判断当前消息是否仍是该会话本批次的最后一条代表。
 
         Args:
-            umo: 群会话 UMO。
+            umo: 会话 UMO。
             window_sec: 攒批窗口秒数；<= 0 时不等待直接放行。
+            item: 可选的该消息载荷（如文本或元组），供 leader 聚拢整批内容。
 
         Returns:
-            True 表示窗口结束且没有更新的同群唤醒消息抢占，由当前消息唤醒主脑；
-            False 表示等待期间同群又有新唤醒消息到达，当前消息应静默让位。
+            True 表示窗口结束且没有更新的消息抢占，由当前消息唤醒主脑；
+            False 表示等待期间又有新消息到达，当前消息应静默让位。
         """
         if window_sec <= 0:
+            if item is not None:
+                self._items_by_umo.setdefault(umo, []).append(item)
             return True
         my_seq = self._seq_by_umo.get(umo, 0) + 1
         self._seq_by_umo[umo] = my_seq
+        if item is not None:
+            self._items_by_umo.setdefault(umo, []).append(item)
         await asyncio.sleep(window_sec)
         return self._seq_by_umo.get(umo, 0) == my_seq
+
+    def pop_batched_items(self, umo: str) -> list[Any]:
+        """取出并清空该会话当前批次收集的所有载荷。"""
+        return self._items_by_umo.pop(umo, [])
+
+
+MessageBatcher = GroupBatcher

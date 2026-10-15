@@ -23,11 +23,23 @@
     "default": [],
     "hint": "每行一条，格式为『UMO或QQ号或群号 = 显示名字』，例如：12345678 = 老哥 或 987654321 = 摸鱼群。"
   },
+  "group_batch_enabled": {
+    "description": "启用群聊点名防大喘气攒批防抖",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后，群友连续 @ 或提及她时，将在攒批窗口内等待合并为一拍再唤醒主脑；关闭后每条点名消息立即唤醒。"
+  },
+  "private_batch_enabled": {
+    "description": "启用私聊防大喘气攒批防抖",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后，私聊连续发多条消息时，将在攒批窗口内等待合并为一拍再唤醒主脑，所有合并消息完整注入上下文；关闭后每条私聊立即唤醒。"
+  },
   "group_batch_window_sec": {
-    "description": "群聊点名防大喘气攒批窗口（秒）",
+    "description": "防大喘气攒批防抖窗口（秒）",
     "type": "int",
     "default": 3,
-    "hint": "群友连续发多条 @ 或提及消息时，等待几秒合并为一拍再唤醒主脑；设为 0 则每条立即唤醒。私聊与定时任务不等待。"
+    "hint": "连续发多条消息时等待合并的秒数，群聊与私聊共用此窗口时长；设为 0 则不等待直接放行。需开启对应的群聊或私聊防抖开关。"
   },
   "mention_inline_enabled": {
     "description": "群点名通知直接附上消息与前后文",
