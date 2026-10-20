@@ -6,14 +6,14 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
-DEFAULT_HEARTBEAT_PROMPT = """[心跳] 已经 {quiet_min} 分钟没人私聊你或在群里叫你了，这是这段时间你第 {idle_ticks} 次自己醒来。
+DEFAULT_HEARTBEAT_PROMPT = """[心跳] 已经 {quiet_min} 分钟没人私聊你、也没人在群里叫你了。这是这段时间里你第 {idle_ticks} 次自己醒来。
 
-趁空下来，打理一下自己的一天：
-1. 对一遍待办和今天的规划（规划不清楚就用 astrhe_read_plan 看全文，待办的备注和日期用 astrhe_read_todos 看）。答应过别人、或者自己说过要做却还没做的事，挑一件现在就能动手的去做，做了就用 astrhe_todo_update 记一笔进展或完成；已经过时、不用再做的，标成放弃。
-2. 想起新的要做的事、聊天里冒出来的约定还没记下，用 astrhe_todo_add 记成待办，挂到用得上它的会话；计划变了就用 astrhe_todo_edit 或 astrhe_plan_edit 改过来。
-3. 现在做不了、得晚点办的事，用 astrhe_schedule 给自己定个时间，到点再醒来处理，别只记在心里。
-4. 看看会话清单，在意的人或群可以用 read_channel 翻一翻，想说话就用 send_message_to_user。
-5. 理完待办，去看看在意的人和群在聊什么、心情怎么样（会话清单里有你上次在每个地方说话是多久以前）。有能接的话、想分享的事、或者很久没去打个招呼了，就用 send_message_to_user 说一句：一次只说一件事、只发一条，发完就等，不追问。对方在忙、在睡，或者你刚在那儿说过话，才安静结束这一拍。"""
+趁现在有空，理一理今天：
+1. 看看待办和今天的规划。规划没印象就用 astrhe_read_plan 看全文，待办的备注和日期用 astrhe_read_todos 看。答应过别人、或者自己说过要做的事，挑一件现在就能做的去做，做完用 astrhe_todo_update 记一笔。已经过时的标成放弃。
+2. 聊天里冒出来的新约定还没记，就用 astrhe_todo_add 记下来，挂到用得上它的会话。计划变了，用 astrhe_todo_edit 或 astrhe_plan_edit 改。
+3. 现在做不了、得晚点做的事，用 astrhe_schedule 定个时间，到点会叫醒你。别只记在脑子里。
+4. 然后去看看在意的人和群。会话清单里写着你上次在每个地方说话是多久以前，想知道他们在聊什么就用 read_channel 翻一翻。有能接的话、想分享的事，或者很久没去打招呼了，就用 send_message_to_user 说一句。一次只说一件事、只发一条，发完就等，别追问。
+5. 对方在忙、在睡，或者你刚在那边说过话，就安静结束这一拍。"""
 
 
 def _coerce_number(

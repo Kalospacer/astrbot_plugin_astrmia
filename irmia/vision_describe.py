@@ -11,9 +11,9 @@ from .config import IrmiaConfig
 from .store import ChannelMessageRow
 from .vision import KeptImage, VisionStore
 
-BRIEF_PROMPT = "用一句话说这张图是什么（{n} 字以内）。图里有文字就把关键文字照抄出来。只说看得见的内容，不要猜。只输出这句话本身。"
-DETAIL_PROMPT = "请用自然流畅的中文客观描述这张图：整体场景、主要主体的外观/动作/表情、空间布局、色调氛围；逐字读出图中所有可见文字；严格基于可见内容，不要猜测；最后用一两句话概括图片的主题。总长度控制在 {n} 字以内。"
-QA_PROMPT = "针对这张图回答问题：{question}\n只根据图里看得见的内容回答，看不出来就直说看不出来。{n} 字以内。"
+BRIEF_PROMPT = "用一句话说这张图是什么，{n} 字以内。图里有字就把关键的字照抄下来。只说看得见的，别猜。只写这一句话。"
+DETAIL_PROMPT = "用中文描述这张图：是什么场景，主要的人或东西长什么样、在做什么、什么表情，东西怎么摆的，整体什么颜色和气氛。图里所有看得清的字都一字不差地抄出来。只说看得见的，别猜。最后用一两句话说这张图大概在讲什么。一共不超过 {n} 字。"
+QA_PROMPT = "看着这张图回答：{question}\n只按图里看得见的回答，看不出来就直说看不出来。{n} 字以内。"
 ATTEMPTS_PER_PROVIDER = 2
 CAPTION_CONCURRENCY = 3
 #: QQ 小表情：一张图紧跟方括号表情名（如 `[图片][吓]`）；表情名不能是「图片」，否则连发两图会被误跳过
@@ -21,7 +21,7 @@ STICKER_RE = re.compile(r"^\[图片\]\s*\[(?!图片)[^\[\]]{1,8}\]$")
 BARE_IMAGE_RE = re.compile(r"\[图片\](?!\s*[:：])")
 #: 账本里的任意图片占位符：裸 `[图片]` 或已带描述 `[图片: 描述]`，用于数一条消息里有几张图
 ANY_IMAGE_RE = re.compile(r"\[图片(?:[:：][^\]]*)?\]")
-PENDING_TEXT = "还没看清，可用 read_image 细看"
+PENDING_TEXT = "还没看清，可以用 read_image 细看"
 
 
 def captions_for(
