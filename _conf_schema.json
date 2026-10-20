@@ -37,7 +37,7 @@
   },
   "group_batch_window_sec": {
     "description": "等几秒",
-    "type": "number",
+    "type": "float",
     "default": 3,
     "hint": "上面两个开关等待的秒数，群聊和私聊共用，可以写小数，比如 2.5。填 0 就不等。"
   },
