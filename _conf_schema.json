@@ -88,7 +88,7 @@
   "heartbeat_prompt": {
     "description": "心跳醒来时对她说的话",
     "type": "text",
-    "default": "[心跳] 已经 {quiet_min} 分钟没人私聊你或在群里叫你了，这是这段时间你第 {idle_ticks} 次自己醒来。\n\n趁空下来，打理一下自己的一天：\n1. 对一遍待办和今天的规划（规划不清楚就用 astrhe_read_plan 看全文，待办的备注和日期用 astrhe_read_todos 看）。答应过别人、或者自己说过要做却还没做的事，挑一件现在就能动手的去做，做了就用 astrhe_todo_update 记一笔进展或完成；已经过时、不用再做的，标成放弃。\n2. 想起新的要做的事、聊天里冒出来的约定还没记下，用 astrhe_todo_add 记成待办，挂到用得上它的会话；计划变了就用 astrhe_todo_edit 或 astrhe_plan_edit 改过来。\n3. 现在做不了、得晚点办的事，用 astrhe_schedule 给自己定个时间，到点再醒来处理，别只记在心里。\n4. 看看会话清单，在意的人或群可以用 read_channel 翻一翻，想说话就用 send_message_to_user。\n5. 待办都理过了、眼下也确实没事，就安静结束这一拍，不用为了说话而说话。",
+    "default": "[心跳] 已经 {quiet_min} 分钟没人私聊你或在群里叫你了，这是这段时间你第 {idle_ticks} 次自己醒来。\n\n趁空下来，打理一下自己的一天：\n1. 对一遍待办和今天的规划（规划不清楚就用 astrhe_read_plan 看全文，待办的备注和日期用 astrhe_read_todos 看）。答应过别人、或者自己说过要做却还没做的事，挑一件现在就能动手的去做，做了就用 astrhe_todo_update 记一笔进展或完成；已经过时、不用再做的，标成放弃。\n2. 想起新的要做的事、聊天里冒出来的约定还没记下，用 astrhe_todo_add 记成待办，挂到用得上它的会话；计划变了就用 astrhe_todo_edit 或 astrhe_plan_edit 改过来。\n3. 现在做不了、得晚点办的事，用 astrhe_schedule 给自己定个时间，到点再醒来处理，别只记在心里。\n4. 看看会话清单，在意的人或群可以用 read_channel 翻一翻，想说话就用 send_message_to_user。\n5. 理完待办，去看看在意的人和群在聊什么、心情怎么样（会话清单里有你上次在每个地方说话是多久以前）。有能接的话、想分享的事、或者很久没去打个招呼了，就用 send_message_to_user 说一句：一次只说一件事、只发一条，发完就等，不追问。对方在忙、在睡，或者你刚在那儿说过话，才安静结束这一拍。",
     "hint": "可用 {quiet_min}（距上次有人私聊或在群里点名她过了多少分钟）和 {idle_ticks}（这段时间第几次自己醒来）两个占位符。手动 /astrmia wake 不带备注时也用这段；留空则用默认文案。"
   },
   "heartbeat_floor_min": {

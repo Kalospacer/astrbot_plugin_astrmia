@@ -61,6 +61,19 @@ def format_short_time(
     return dt.strftime("%m-%d %H:%M")
 
 
+def format_ago(seconds: float) -> str:
+    """把距今秒数格式化为『N 分钟前 / N 小时前 / N 天前』，不足一分钟为『刚刚』。"""
+    minutes = int(max(0.0, seconds) // 60)
+    if minutes < 1:
+        return "刚刚"
+    if minutes < 60:
+        return f"{minutes} 分钟前"
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours} 小时前"
+    return f"{hours // 24} 天前"
+
+
 def format_clock_line(now_ts: float, tz_name: str = "Asia/Shanghai") -> str:
     """生成此刻层顶部的『时刻：』行。"""
     tz, effective_label = resolve_tz(tz_name)
@@ -131,10 +144,12 @@ def render_session_list(
     resolve_where_fn,
     tz_name: str = "Asia/Shanghai",
     max_items: int = 8,
+    now_ts: float | None = None,
 ) -> str:
-    """渲染此刻层的外部会话信箱清单（复刻 self-brief.ts renderSessionList）。"""
+    """渲染此刻层的外部会话信箱清单（复刻 self-brief.ts renderSessionList），行尾标出我上次在该会话说话距今多久。"""
     if not sessions:
         return "外部会话：还没收到过任何外部消息。"
+    now = now_ts if now_ts is not None else datetime.now(tz=timezone.utc).timestamp()
     shown = sessions[:max_items]
     lines: list[str] = []
     for s in shown:
@@ -146,8 +161,13 @@ def render_session_list(
         topic_part = (
             f"｜在聊：{s.topic}" if (s.unread > 0 and s.topic.strip()) else ""
         )
+        my_last_part = (
+            f"｜我上次在这说话：{format_ago(now - s.my_last_ts)}"
+            if s.my_last_ts > 0
+            else "｜我还没在这说过话"
+        )
         lines.append(
-            f"- {kind_label} · {where}｜sid {s.umo}｜最后 {when}{unread_part}{topic_part}"
+            f"- {kind_label} · {where}｜sid {s.umo}｜最后 {when}{unread_part}{topic_part}{my_last_part}"
         )
     rest = (
         f"\n（还有 {len(sessions) - max_items} 个更早的会话没列出来）"
