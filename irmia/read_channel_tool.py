@@ -98,10 +98,10 @@ def _paging_footer(
     """生成页脚翻页指路说明。"""
     if more and next_before > 1:
         return (
-            f"—— 更早的记录：传 before={next_before} 往前翻"
+            f"—— 想看更早的，传 before={next_before} 往前翻"
             f"（每页 {page_size} 条，翻页不改已读）。"
         )
-    return "—— 已经是这个会话最早的记录了。"
+    return "—— 已经翻到这个会话最早的记录了。"
 
 
 async def execute_read_channel(
@@ -125,7 +125,7 @@ async def execute_read_channel(
     pid, mtype, session_id = parse_umo(target_sid)
     if not pid or not mtype or not session_id:
         return (
-            f"sid 格式不对：{target_sid}。"
+            f"sid 写得不对：{target_sid}。"
             "会话清单里的 sid 长这样：aiocqhttp:GroupMessage:群号。"
         )
 
@@ -183,8 +183,8 @@ async def execute_read_channel(
         if not batch:
             return (
                 f"{target_sid} 在 before={cursor_before} 之前没有记录了。"
-                "可能已经翻到头，也可能这个游标不是这个会话的。"
-                "想看未读就不带 before 再读一次。"
+                "可能已经翻到头，也可能这个 before 是别的会话的。"
+                "想看未读，就不带 before 再读一次。"
             )
         where_label = store.resolve_session_name(
             target_sid,
@@ -213,7 +213,7 @@ async def execute_read_channel(
     pool = store.fetch_messages(target_sid, limit=pool_size)
     if not pool:
         return (
-            f"{target_sid} 里没有消息。可能这个会话还没有记录，也可能 sid 写错了，对一下会话清单。"
+            f"{target_sid} 里没有消息。可能这个会话还没有记录，也可能 sid 写错了，跟会话清单对一下。"
         )
 
     prev_read_id = int(st.get("read_up_to_id", 0) or 0)
@@ -259,7 +259,7 @@ async def execute_read_channel(
         has_own = any(m.is_bot for m in pool)
         mine_note = "，包括你自己发的（行首（我））" if has_own else ""
         way = (
-            f"要看更早的（包括没叫你的）就传 before={newest_id + 1} 往前翻"
+            f"想看更早的（包括没叫你的），就传 before={newest_id + 1} 往前翻"
             f"（每页 {READ_CHANNEL_PAGE_SIZE} 条，翻页不改已读）。"
             if len(pool) > 0
             else "没有更早的了。"
@@ -312,7 +312,7 @@ async def execute_read_channel(
         asked_cnt = store.count_unread(target_sid, prev_read_id)
         return (
             f"{target_sid} 没有叫你的新消息。另外有 {asked_cnt} 条没叫你的新消息，这次没列出来。"
-            f"想看就传 before={newest_id + 1} 往前翻"
+            f"想看，就传 before={newest_id + 1} 往前翻"
             f"（每页 {READ_CHANNEL_PAGE_SIZE} 条，翻页不改已读）。"
         )
 
@@ -379,11 +379,11 @@ class ReadChannelTool(FunctionTool):
 
     name: str = "read_channel"
     description: str = (
-        "读某个 QQ 群或私聊的消息，包括你自己在那边说过的话（行首（我））。"
-        f"默认只给未读里叫了你的消息和每条之前 {READ_CHANNEL_MENTION_CONTEXT} 条，叫了你的行前面有 ▶；未读不到一屏就全给。读过的会标记已读。"
+        "读某个 QQ 群或私聊的消息，也包括你自己在那边说过的话（行首写着（我））。"
+        f"未读不到一屏就全部给你；太多的话，只给叫了你的消息，和每条之前的 {READ_CHANNEL_MENTION_CONTEXT} 条。叫了你的那行前面有 ▶。读过的会标记已读。"
         f"传 before 可以往前翻历史，每页 {READ_CHANNEL_PAGE_SIZE} 条，翻页不改已读。"
-        "要说话用 send_message_to_user。"
-        "图片后面会带一句描述；想细看或者问图里的具体内容，用 read_image（传 sid 和行首的 #编号）。"
+        "想说话用 send_message_to_user。"
+        "图片后面会带一句描述。想细看或者问图里的具体内容，用 read_image，传 sid 和行首的 #编号。"
     )
     parameters: dict = Field(
         default_factory=lambda: {
@@ -391,20 +391,20 @@ class ReadChannelTool(FunctionTool):
             "properties": {
                 "sid": {
                     "type": "string",
-                    "description": "会话的 sid，形如 aiocqhttp:GroupMessage:群号，在会话清单里。",
+                    "description": "会话的 sid，长得像 aiocqhttp:GroupMessage:群号，从会话清单里抄。",
                 },
                 "before": {
                     "type": "integer",
                     "description": (
-                        "可选。翻页游标，从上一次结果末尾的提示里抄。"
-                        f"传了就读这个 id 之前的历史，每页 {READ_CHANNEL_PAGE_SIZE} 条，不改已读；不传就读未读。"
+                        "可选。翻页用的编号，从上一次结果末尾的提示里抄。"
+                        f"传了就读这个编号之前的历史，每页 {READ_CHANNEL_PAGE_SIZE} 条，不改已读。不传就读未读。"
                     ),
                 },
                 "limit": {
                     "type": "integer",
                     "description": (
-                        f"这次最多返回几条。默认 {READ_CHANNEL_DEFAULT_LIMIT}，翻页默认 {READ_CHANNEL_PAGE_SIZE}，"
-                        f"最多 {READ_CHANNEL_MAX_LIMIT}。你自己的发言也算条数。"
+                        f"这次最多给几条。默认 {READ_CHANNEL_DEFAULT_LIMIT} 条，翻页时默认 {READ_CHANNEL_PAGE_SIZE} 条，"
+                        f"最多 {READ_CHANNEL_MAX_LIMIT} 条。你自己说的话也算在里面。"
                     ),
                 },
             },

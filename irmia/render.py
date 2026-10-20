@@ -61,6 +61,19 @@ def format_short_time(
     return dt.strftime("%m-%d %H:%M")
 
 
+def format_ago(seconds: float) -> str:
+    """把距今秒数格式化为『N 分钟前 / N 小时前 / N 天前』，不足一分钟为『刚刚』。"""
+    minutes = int(max(0.0, seconds) // 60)
+    if minutes < 1:
+        return "刚刚"
+    if minutes < 60:
+        return f"{minutes} 分钟前"
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours} 小时前"
+    return f"{hours // 24} 天前"
+
+
 def format_clock_line(now_ts: float, tz_name: str = "Asia/Shanghai") -> str:
     """生成此刻层顶部的『时刻：』行。"""
     tz, effective_label = resolve_tz(tz_name)
@@ -92,36 +105,36 @@ def build_self_brief(
         装置自述文本块。
     """
     reply_rules = [
-        "- 谁叫醒你，你直接写的文字就回给谁。",
-        "- 不想回就只输出 [SILENT]，这句不会发出去。",
-        "- 要给别的群或别的人发消息，用 send_message_to_user，session 填对方的 sid。",
-        "- 心跳醒来时没有人在等你，直接写的文字谁也收不到。想说话只能用 send_message_to_user。",
+        "- 谁叫醒你，你直接写的字就回给谁。",
+        "- 不想回，就只写 [SILENT]，这句不会发出去。",
+        "- 想给别的群或别的人发消息，用 send_message_to_user，session 填对方的 sid。",
+        "- 心跳醒来时没人在等你，直接写的字谁也收不到。想说话只能用 send_message_to_user。",
     ]
     if intercept_direct_reply:
         reply_rules.append(
-            "- 这一轮已经用 send_message_to_user 发到了当前窗口的话，后面直接写的文字就不再发出去，免得同一句说两遍。"
+            "- 这一轮已经用 send_message_to_user 发到了叫醒你的这个会话，后面直接写的字就不再发了，免得同一句说两遍。"
         )
 
     return "\n".join(
         [
             SELF_BRIEF_HEADER,
-            "你只有一个连续的意识。QQ 上的私聊和群聊都接到同一个你，记忆是连着的。每个会话有一个 sid，在下面的会话清单里。",
+            "QQ 上所有的私聊和群聊都连到同一个你，记忆是连着的。每个会话有一个 sid，写在下面的会话清单里。",
             "",
             "怎么说话：",
             *reply_rules,
             "",
-            "谁需要回：",
+            "要不要回：",
             "- 管理员私聊你，基本都要回。",
-            "- 其他人和群里的消息你看得到，但不欠谁回复。和你无关或者不想理，可以不回。",
-            "- 群里被 @ 或被叫到名字，通知里已经附上了叫你的那几句和前后文，看完直接决定接不接；觉得不够再用 read_channel 往前翻。"
+            "- 别人和群里的消息你都看得到，但不欠谁一句回复。跟你无关、或者不想理，可以不回。",
+            "- 在群里被 @ 或被叫到名字时，通知里已经附上了叫你的那几句和前后文，看完就能决定接不接。不够的话再用 read_channel 往前翻。"
             if mention_inline
-            else "- 群里被 @ 或被叫到名字，只说明有人在叫你。先用 read_channel 看前后在聊什么，再决定接不接。",
+            else "- 在群里被 @ 或被叫到名字时，通知只告诉你有人在叫你。先用 read_channel 看看在聊什么，再决定接不接。",
             "",
             "群消息：",
-            f"- 群里没叫你的消息不会叫醒你，只记成未读。会话清单里能看到未读数和一句 {topic_max_chars} 字以内的话题。",
+            f"- 群里没叫你的消息不会叫醒你，只记成未读。会话清单里能看到未读数，还有一句 {topic_max_chars} 字以内的话题。",
             "- 想看就用 read_channel(sid=...)，消息不会丢。",
             "",
-            "管理员不在线很正常，一般是在忙或者在睡。心跳醒来想找人说话，或者看到哪个群有意思，可以用 send_message_to_user 过去说一句。",
+            "管理员不在线很正常，多半是在忙或者在睡。心跳醒来想找人说话，或者觉得哪个群有意思，可以用 send_message_to_user 过去说一句。",
         ]
     )
 
@@ -131,10 +144,12 @@ def render_session_list(
     resolve_where_fn,
     tz_name: str = "Asia/Shanghai",
     max_items: int = 8,
+    now_ts: float | None = None,
 ) -> str:
-    """渲染此刻层的外部会话信箱清单（复刻 self-brief.ts renderSessionList）。"""
+    """渲染此刻层的外部会话信箱清单（复刻 self-brief.ts renderSessionList），行尾标出我上次在该会话说话距今多久。"""
     if not sessions:
         return "外部会话：还没收到过任何外部消息。"
+    now = now_ts if now_ts is not None else datetime.now(tz=timezone.utc).timestamp()
     shown = sessions[:max_items]
     lines: list[str] = []
     for s in shown:
@@ -146,16 +161,21 @@ def render_session_list(
         topic_part = (
             f"｜在聊：{s.topic}" if (s.unread > 0 and s.topic.strip()) else ""
         )
+        my_last_part = (
+            f"｜我上次在这说话：{format_ago(now - s.my_last_ts)}"
+            if s.my_last_ts > 0
+            else "｜我还没在这说过话"
+        )
         lines.append(
-            f"- {kind_label} · {where}｜sid {s.umo}｜最后 {when}{unread_part}{topic_part}"
+            f"- {kind_label} · {where}｜sid {s.umo}｜最后 {when}{unread_part}{topic_part}{my_last_part}"
         )
     rest = (
-        f"\n（还有 {len(sessions) - max_items} 个更早的会话没列出来）"
+        f"\n（还有 {len(sessions) - max_items} 个更早的会话没列出来。）"
         if len(sessions) > max_items
         else ""
     )
     return (
-        "外部会话（sid 填进 send_message_to_user 的 session 或 read_channel 的 sid）：\n"
+        "外部会话（sid 可以填进 send_message_to_user 的 session，或者 read_channel 的 sid）：\n"
         + "\n".join(lines)
         + rest
     )
@@ -192,11 +212,11 @@ def render_mention_notice(
     if unread <= 0:
         return (
             f"{head}，这条你还没看。{talking}"
-            f"要看就用 read_channel(sid={umo})。回不回你自己定。"
+            f"想看就用 read_channel(sid={umo})。回不回你自己定。"
         )
     return (
         f"{head}，那边一共有 {unread} 条未读。{talking}"
-        f"要看就用 read_channel(sid={umo})：只想看叫你的那几句就把 limit 调小，想全看就调大。回不回你自己定。"
+        f"想看就用 read_channel(sid={umo})。只看叫你的那几句就把 limit 调小，想全看就调大。回不回你自己定。"
     )
 
 
@@ -215,9 +235,9 @@ def render_mention_notice_with_digest(
     head = _mention_head(where_name, caller_name, is_at, at_label)
     return (
         f"{head}，那边一共有 {unread} 条未读。{_talking(topic)}\n"
-        f"下面就是刚才叫你的消息和前后文，已经帮你读过了（标记已读），不用再 read_channel 这个群（sid={umo}）：\n"
+        f"下面是叫你的消息和前后文，已经替你读过并标记已读了，不用再 read_channel 这个群（sid={umo}）：\n"
         f"{digest}\n"
-        "想往前翻更早的，照上面的提示传 before 用 read_channel。回不回你自己定。"
+        "想看更早的，照上面的提示传 before 给 read_channel。回不回你自己定。"
     )
 
 

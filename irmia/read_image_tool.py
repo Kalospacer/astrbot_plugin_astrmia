@@ -23,9 +23,9 @@ except Exception:  # pragma: no cover - 沿用旧工具的无 AstrBot 单测基�
 
 
 READ_IMAGE_DESCRIPTION = (
-    "看聊天记录里某条消息的图片。传 sid 和 read_channel 行首的 #编号；"
-    "不带 question 给详细描述（含图里的文字），带 question 就针对问题回答。"
-    "只能看最近 {keep_days} 天的图。硬盘上的图片文件不归这个工具，用 vision_read。"
+    "看聊天记录里某条消息的图。传 sid 和 read_channel 行首的 #编号。"
+    "不带 question 就给你详细描述（包括图里的字），带了 question 就只回答这个问题。"
+    "只能看最近 {keep_days} 天的图。硬盘上的图片文件不归这个工具管。"
 )
 
 
@@ -43,7 +43,7 @@ class ReadImageTool(FunctionTool):
             "properties": {
                 "sid": {
                     "type": "string",
-                    "description": "会话 sid，和 read_channel 相同。",
+                    "description": "会话的 sid，跟 read_channel 用的一样。",
                 },
                 "msg_id": {
                     "type": "integer",
@@ -51,12 +51,12 @@ class ReadImageTool(FunctionTool):
                 },
                 "index": {
                     "type": "integer",
-                    "description": "可选。一条消息里看第几张图，从 1 开始，默认 1。",
+                    "description": "可选。一条消息有好几张图时看第几张，从 1 开始数，默认第 1 张。",
                     "default": 1,
                 },
                 "question": {
                     "type": "string",
-                    "description": "可选。想问图里的什么；不填则给详细描述。",
+                    "description": "可选。想问图里的什么。不填就给详细描述。",
                 },
             },
             "required": ["sid", "msg_id"],
@@ -84,7 +84,7 @@ async def execute_read_image(
 ) -> str:
     """按同一账本来源定位消息，查看指定的留底图或返回可读原因。"""
     if not all(parse_umo(sid)):
-        return "sid 格式不对，请从 read_channel 或会话清单里抄完整的 sid。"
+        return "sid 写得不对，从 read_channel 的结果或会话清单里把完整的 sid 抄过来。"
     row = await asyncio.to_thread(store.get_message, sid, msg_id)
     if row is None:
         return f"这个会话里没有 #{msg_id} 这条消息。"
@@ -92,13 +92,13 @@ async def execute_read_image(
     if count == 0:
         return "这条消息没有图。"
     if index < 1 or index > count:
-        return f"这条消息只有 {count} 张图，index 从 1 开始。"
+        return f"这条消息只有 {count} 张图，index 从 1 开始数。"
     images = await asyncio.to_thread(vstore.kept_for, sid, row.platform_message_id)
     kept = next((image for image in images if image.idx == index - 1), None)
     if kept is None or not await asyncio.to_thread(Path(kept.path).is_file):
         return (
-            f"这张图没有留底了：只保留最近 {keep_days} 天的图，"
-            "上线前的图或留底失败的图也无法查看。"
+            f"这张图没存下来：只保留最近 {keep_days} 天的图，"
+            "插件装上之前的图、或者当时没存成功的图也看不了。"
         )
     text = await captioner.describe_for_tool(sid, kept, question.strip())
-    return text or "识图模型都失败了，这张图还没看清。"
+    return text or "识图的模型都没看成，这张图暂时看不了。"

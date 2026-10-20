@@ -784,7 +784,7 @@ class IrmiaRuntime:
                 [
                     "=== [IRMIA] 当前状态 ===",
                     format_clock_line(time.time(), tz),
-                    "这次是你自己醒来的，没有会话在等你回复。"
+                    "这次是你自己醒来的，没有人在等你回话。"
                     if is_wake
                     else f"这次叫醒你的会话：{umo}",
                     render_session_list(
@@ -1352,7 +1352,7 @@ class IrmiaRuntime:
             f"目标均值 {dist.mean_ms / 60000:.1f}m · α={dist.alpha:.4f}）",
             self.quiet_window_note(cfg),
             f"识图缓存：{await self._vision_cache_note(cfg)}",
-            f"当前安静时长：{quiet_min:.1f} 分钟（下一拍抽中概率 p={cur_p:.3f}，连续空拍={self.heartbeat.idle_ticks}）",
+            f"当前安静时长：{quiet_min:.1f} 分钟（下一拍抽中概率 p={cur_p:.3f}，这段时间自己醒了 {self.heartbeat.idle_ticks} 次）",
             f"已知外部会话数：{len(sessions)}",
         ]
         for s in sessions[: cfg.session_list_max]:

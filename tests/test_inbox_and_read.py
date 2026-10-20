@@ -7,7 +7,7 @@ from pathlib import Path
 
 from irmia.inbox import evaluate_channel_message
 from irmia.read_channel_tool import execute_read_channel
-from irmia.render import render_mention_notice, render_session_list
+from irmia.render import format_ago, render_mention_notice, render_session_list
 from irmia.store import IrmiaStore
 
 
@@ -209,6 +209,54 @@ def test_render_mention_notice_and_session_list(tmp_path: Path) -> None:
         rendered = render_session_list(sessions, lambda s: s.group_name)
         assert "摸鱼群｜sid aiocqhttp:GroupMessage:888888" in rendered
         assert "｜1 条未读｜在聊：大家在打招呼" in rendered
+        assert "我还没在这说过话" in rendered
         await store.close()
 
     asyncio.run(_run())
+
+
+def test_session_list_shows_my_last_speech(tmp_path: Path) -> None:
+    """会话清单每行标出我上次在该会话说话距今多久，没说过的标明没说过。"""
+
+    async def _run() -> None:
+        store = IrmiaStore(tmp_path / "irmia_my_last")
+        await store.open()
+        spoken_umo = "aiocqhttp:GroupMessage:777"
+        silent_umo = "aiocqhttp:FriendMessage:888"
+        now = 1_700_000_000.0
+        common = {"platform_id": "aiocqhttp", "sender_name": "阿强"}
+
+        await store.ensure_message_recorded(
+            umo=spoken_umo, message_type="GroupMessage", session_id="777",
+            sender_id="bot", text="我来啦", ts=now - 3 * 3600, is_bot=True, **common,
+        )
+        await store.ensure_message_recorded(
+            umo=spoken_umo, message_type="GroupMessage", session_id="777",
+            sender_id="12345", text="欢迎", ts=now - 60, **common,
+        )
+        await store.ensure_message_recorded(
+            umo=silent_umo, message_type="FriendMessage", session_id="888",
+            sender_id="888", text="在吗", ts=now - 120, **common,
+        )
+
+        sessions = {s.umo: s for s in await store.list_sessions()}
+        assert sessions[spoken_umo].my_last_ts == now - 3 * 3600
+        assert sessions[silent_umo].my_last_ts == 0.0
+
+        rendered = render_session_list(
+            list(sessions.values()), lambda s: s.umo, now_ts=now
+        )
+        lines = {line.split("｜sid ")[1].split("｜")[0]: line for line in rendered.splitlines()[1:]}
+        assert "我上次在这说话：3 小时前" in lines[spoken_umo]
+        assert "我还没在这说过话" in lines[silent_umo]
+        await store.close()
+
+    asyncio.run(_run())
+
+
+def test_format_ago_buckets() -> None:
+    """距今时长按分钟、小时、天三档取整显示。"""
+    assert format_ago(30) == "刚刚"
+    assert format_ago(5 * 60) == "5 分钟前"
+    assert format_ago(3 * 3600 + 1200) == "3 小时前"
+    assert format_ago(2 * 86400 + 3600) == "2 天前"

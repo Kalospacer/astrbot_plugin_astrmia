@@ -90,6 +90,7 @@ class SessionSummary:
     unread: int
     topic: str
     group_name: str
+    my_last_ts: float = 0.0
 
 
 @dataclass
@@ -733,11 +734,12 @@ class IrmiaStore:
                     f"""
                     SELECT m.umo, m.platform_id, m.message_type, m.session_id,
                            m.sender_id, m.sender_name, m.sender_card, m.text, m.ts,
-                           stats.total_cnt, stats.live_cnt
+                           stats.total_cnt, stats.live_cnt, stats.my_last_ts
                     FROM {table} m
                     INNER JOIN (
                         SELECT umo, MAX(id) AS max_id, COUNT(*) AS total_cnt,
-                               SUM(CASE WHEN source = 'live' THEN 1 ELSE 0 END) AS live_cnt
+                               SUM(CASE WHEN source = 'live' THEN 1 ELSE 0 END) AS live_cnt,
+                               MAX(CASE WHEN is_bot = 1 THEN ts END) AS my_last_ts
                         FROM {table}
                         WHERE recalled=0
                         GROUP BY umo
@@ -798,6 +800,7 @@ class IrmiaStore:
                         unread=unread,
                         topic=topic,
                         group_name=group_name,
+                        my_last_ts=float(r["my_last_ts"] or 0.0),
                     )
                 )
             return out
