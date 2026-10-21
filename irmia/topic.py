@@ -11,7 +11,12 @@ from typing import Any, Callable
 
 from .config import IrmiaConfig
 from .store import ChannelMessageRow, IrmiaStore
-from .vision_describe import Captioner, captions_for, render_with_captions
+from .vision_describe import (
+    ANY_IMAGE_RE,
+    Captioner,
+    captions_for,
+    render_with_captions,
+)
 
 
 def build_topic_prompt(lines: list[str], max_chars: int) -> str:
@@ -219,10 +224,13 @@ class TopicSummarizer:
             raw = str(m.text or "").strip()
             if not raw:
                 continue
+            # 图片描述当原文料用：不裁字数，让小模型自己压；带图的行走原文长度
+            has_image = bool(ANY_IMAGE_RE.search(raw))
             raw = render_with_captions(raw, captions_for(m, captions))
-            lines.append(
-                f"{alias_of(m)}: {raw.replace(chr(10), ' ')[: cfg.topic_line_max_chars]}"
-            )
+            line = raw.replace(chr(10), " ")
+            if not has_image:
+                line = line[: cfg.topic_line_max_chars]
+            lines.append(f"{alias_of(m)}: {line}")
         if not lines:
             return False, ""
 

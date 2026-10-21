@@ -130,15 +130,17 @@ git clone https://github.com/Kalospacer/astrbot_plugin_astrmia
 
 ### 群聊识图
 
+识图提示同一律跟 AstrBot 主对话走：提示词取面板里的 `provider_settings.image_caption_prompt`，模型优先用 `provider_settings.default_image_caption_provider_id`。插件自己不存一套提示词，也不解析描述里的固定结构，所以换别人的模板不会把排版弄坏。
+
 | 配置项 | 默认值 | 说明 |
 |---|---|---|
 | `image_keep_days` | `3` | 聊天图片在本地缩略留底的天数（填 `0` 不保存） |
 | `read_channel_image_enabled` | `true` | 读群时自动识别图片并附上文字描述 |
 | `read_channel_image_max` | `6` | 单次读群最多新识别几张图片 |
 | `read_channel_image_wait_sec` | `8` | 读群等待识图的最长秒数，超时未完成的转入后台继续识别 |
-| `image_brief_max_chars` | `80` | 读群和概括话题时单张图片描述的字数上限 |
-| `read_image_max_chars` | `500` | 主动调用看图工具查看图片细节时的回答字数上限 |
-| `vision_provider_ids` | `[]` | 识图模型列表，按顺序尝试，留空则使用小模型 |
+| `image_brief_max_chars` | `80` | 读群展示原文行时单张图片描述截断的字数（完整描述仍在，用 `read_image` 看） |
+| `read_image_max_chars` | `500` | 看图工具返回的字数上限 |
+| `vision_provider_ids` | `[]` | 兜底识图模型列表，AstrBot 面板没配识图模型时才按顺序试 |
 | `vision_timeout_sec` | `60` | 单次识图请求超时秒数 |
 | `topic_image_caption_enabled` | `true` | 概括群话题时是否带上图片描述 |
 | `vision_cache_ttl_days` | `30` | 图片描述缓存的保留天数 |

@@ -220,7 +220,7 @@ class IrmiaRuntime:
             self.store.data_dir / "vision.db", self.store.data_dir / "kept_images"
         )
         self.captioner = Captioner(
-            self.vision_store, self._vision_providers, self.cfg, self._spawn_bg, logger
+            self.vision_store, context, self.cfg, self._spawn_bg, logger
         )
         self.topic_summarizer.captioner = self.captioner
 
@@ -296,16 +296,6 @@ class IrmiaRuntime:
             f"[IRMIA] 已启动：心跳区间 {dist.floor_ms / 60000:.0f}~{dist.ceil_ms / 60000:.0f}m, "
             f"目标均值 {dist.mean_ms / 60000:.2f}m (alpha={dist.alpha:.4f})"
         )
-
-    async def _vision_providers(self, umo: str) -> list[Any]:
-        """按识图降级链解析模型，未配置时复用轻量模型及会话默认模型。"""
-        cfg = self.cfg()
-        providers = []
-        for provider_id in cfg.vision_provider_ids or [cfg.light_provider_id]:
-            provider = await self.topic_summarizer.resolve_provider(umo, provider_id)
-            if provider is not None:
-                providers.append(provider)
-        return providers
 
     async def terminate(self) -> None:
         """停止心跳循环、等待后台任务收尾并关闭存储。"""
@@ -409,6 +399,7 @@ class IrmiaRuntime:
             captioner=self.captioner if cfg.read_channel_image_enabled else None,
             caption_wait_sec=cfg.read_channel_image_wait_sec,
             caption_max_new=cfg.read_channel_image_max,
+            image_brief_max_chars=cfg.image_brief_max_chars,
         )
 
     async def _record_bot_speech(self, umo: str, text: str) -> None:

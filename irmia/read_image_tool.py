@@ -12,7 +12,12 @@ from pydantic.dataclasses import dataclass as pydantic_dataclass
 from .config import IrmiaConfig
 from .store import IrmiaStore, parse_umo
 from .vision import VisionStore
-from .vision_describe import ANY_IMAGE_RE, Captioner
+from .vision_describe import (
+    ANY_IMAGE_RE,
+    DESCRIBED_IMAGE_RE,
+    PENDING_TEXT,
+    Captioner,
+)
 
 try:
     from astrbot.api import FunctionTool
@@ -100,5 +105,16 @@ async def execute_read_image(
             f"这张图没存下来：只保留最近 {keep_days} 天的图，"
             "插件装上之前的图、或者当时没存成功的图也看不了。"
         )
-    text = await captioner.describe_for_tool(sid, kept, question.strip())
+    question = question.strip()
+    if not question:
+        # 账本里核心管线已经写好的描述就是全文，直接给，不再重复识一次
+        stored = [
+            m.group(1).strip() for m in DESCRIBED_IMAGE_RE.finditer(row.text or "")
+        ]
+        if index <= len(stored) and stored[index - 1] not in (
+            "",
+            PENDING_TEXT,
+        ):
+            return stored[index - 1]
+    text = await captioner.describe_for_tool(sid, kept, question)
     return text or "识图的模型都没看成，这张图暂时看不了。"

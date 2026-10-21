@@ -152,23 +152,23 @@
     "hint": "没等到的标「还没看清」，后台继续识别。"
   },
   "image_brief_max_chars": {
-    "description": "图片一句话字数上限",
+    "description": "读群时图片描述截断字数",
     "type": "int",
     "default": 80,
-    "hint": "读群和概括话题共用。"
+    "hint": "read_channel 展示原始消息行时按这个字数裁描述，超长补省略号。完整描述仍在，用 read_image 看。0 不裁。"
   },
   "read_image_max_chars": {
     "description": "read_image 回答字数上限",
     "type": "int",
     "default": 500,
-    "hint": "不带问题给详细描述，带问题只回答。"
+    "hint": "不带问题直接给账本里存下的完整描述，带问题只回答。0 不裁。"
   },
   "vision_provider_ids": {
     "description": "识图模型降级链",
     "type": "list",
     "default": [],
     "_special": "select_providers",
-    "hint": "按顺序尝试，每个最多两次。留空用小模型。"
+    "hint": "优先用 AstrBot 面板里的识图模型；那没配才按这个顺序试。留空用会话默认模型。"
   },
   "vision_timeout_sec": {
     "description": "单次识图超时秒数",
@@ -180,7 +180,7 @@
     "description": "概括话题时给图配描述",
     "type": "bool",
     "default": true,
-    "hint": "和读群共用缓存，不写回账本。"
+    "hint": "提示词跟 AstrBot 主对话共用一份，不写回账本。"
   },
   "vision_cache_ttl_days": {
     "description": "描述缓存保留天数",

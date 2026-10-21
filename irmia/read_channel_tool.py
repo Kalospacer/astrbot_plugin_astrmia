@@ -86,6 +86,7 @@ async def execute_read_channel(
     captioner: Captioner | None = None,
     caption_wait_sec: float = 8,
     caption_max_new: int = 6,
+    image_brief_max_chars: int = IrmiaConfig.image_brief_max_chars,
 ) -> str:
     """执行 read_channel 核心逻辑（纯业务函数，便于直接单测与工具调用）。"""
     target_sid = str(sid or "").strip()
@@ -138,7 +139,9 @@ async def execute_read_channel(
                 else ""
             )
             raw_text = (r.text or "").replace("\r\n", "\n").strip()
-            raw_text = render_with_captions(raw_text, captions_for(r, captions))
+            raw_text = render_with_captions(
+                raw_text, captions_for(r, captions), image_brief_max_chars
+            )
             body = raw_text or "[空消息]"
             lines.append(f"{prefix}[{stamp} #{r.id}] {who}: {body}")
         return lines

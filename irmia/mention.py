@@ -42,6 +42,7 @@ async def build_mention_notice(
         captioner=captioner if cfg.read_channel_image_enabled else None,
         caption_wait_sec=0,
         caption_max_new=cfg.read_channel_image_max,
+        image_brief_max_chars=cfg.image_brief_max_chars,
     )
     return render_mention_notice_with_digest(
         umo=sid, unread=unread, digest=digest, **meta
