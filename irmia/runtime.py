@@ -16,7 +16,11 @@ from .config import IrmiaConfig, is_in_quiet_window, load_irmia_config
 from .heartbeat import HeartbeatEngine, HeartbeatFiring
 from .inbox import GroupBatcher, evaluate_channel_message
 from .mention import build_mention_notice
-from .read_channel_tool import ReadChannelTool, execute_read_channel
+from .read_channel_tool import (
+    READ_CHANNEL_DESCRIPTION,
+    ReadChannelTool,
+    execute_read_channel,
+)
 from .read_image_tool import READ_IMAGE_DESCRIPTION, ReadImageTool, execute_read_image
 from .render import (
     SELF_BRIEF_HEADER,
@@ -27,7 +31,7 @@ from .render import (
     render_session_list,
     resolve_tz,
 )
-from .store import IrmiaStore, parse_umo
+from .store import IrmiaStore, is_group_umo, parse_umo
 from .topic import TopicSummarizer
 from .vision import VisionStore
 from .vision_describe import Captioner
@@ -335,7 +339,12 @@ class IrmiaRuntime:
             return
         try:
             add_llm_tools(
-                ReadChannelTool(handler_fn=self._handle_read_channel_tool),
+                ReadChannelTool(
+                    handler_fn=self._handle_read_channel_tool,
+                    description=READ_CHANNEL_DESCRIPTION.format(
+                        segment_msg_count=self.cfg().segment_msg_count
+                    ),
+                ),
                 # 群聊消息里的图片用 read_image 看。
                 ReadImageTool(
                     handler_fn=self._handle_read_image_tool,
@@ -763,6 +772,7 @@ class IrmiaRuntime:
             cfg.intercept_direct_reply,
             cfg.topic_max_chars,
             mention_inline=cfg.mention_inline_enabled,
+            segment_msg_count=cfg.segment_msg_count,
         )
         workspace_note = ""
         if hasattr(req, "system_prompt"):
@@ -1349,7 +1359,7 @@ class IrmiaRuntime:
         dist = self.heartbeat.distribution()
         quiet_min = self.heartbeat.quiet_ms() / 60_000.0
         cur_p = self.heartbeat.current_probability()
-        sessions = await self.store.list_sessions()
+        sessions = await self.store.list_sessions(include_unread=True)
         astrhe_linked = (
             "已连接"
             if self.store.astrhe_db_path and self.store.astrhe_db_path.is_file()
@@ -1379,7 +1389,12 @@ class IrmiaRuntime:
                 cfg.contacts_map,
             )
             topic_str = f" · 话题：{s.topic}" if s.topic else ""
+            seg_str = (
+                f"今天 {s.today_segments} 段 / 历史 {s.history_segments} 段"
+                if is_group_umo(s.umo)
+                else "私聊"
+            )
             lines.append(
-                f"  - {name} ({s.umo})：未读 {s.unread} / 总计 {s.total_messages}{topic_str}"
+                f"  - {name} ({s.umo})：{seg_str} / 未读 {s.unread} / 总计 {s.total_messages}{topic_str}"
             )
         return "\n".join(lines)

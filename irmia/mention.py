@@ -36,6 +36,7 @@ async def build_mention_notice(
         mention_keywords=cfg.mention_keywords,
         bot_self_ids=bot_self_ids,
         called_sid_this_turn=sid,
+        digest_only=True,
         tz_name=tz_name,
         repeat_counter=None,
         captioner=captioner if cfg.read_channel_image_enabled else None,

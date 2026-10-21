@@ -92,7 +92,7 @@ def test_astrhe_database_bridge(tmp_path: Path) -> None:
         assert store.resolve_person_name("2480866457", noisy_raw, "") == "彼岸"
 
         # 验证外部会话清单聚合（自动排除已撤回消息，未读数只算非 bot 消息 = 1 条）
-        sessions = await store.list_sessions()
+        sessions = await store.list_sessions(include_unread=True)
         assert len(sessions) == 1
         assert sessions[0].umo == umo
         assert sessions[0].total_messages == 2
@@ -105,7 +105,7 @@ def test_astrhe_database_bridge(tmp_path: Path) -> None:
         assert "这条撤回了不该看见" not in out
 
         # 读完后未读数归零，且 read_up_to_id 停在最后一条非 bot 消息 id=1（不被 id=3 的 bot 消息垫高）
-        sessions_after = await store.list_sessions()
+        sessions_after = await store.list_sessions(include_unread=True)
         assert sessions_after[0].unread == 0
         st_after = await store.get_session_state(umo)
         assert st_after["read_up_to_id"] == 1

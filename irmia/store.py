@@ -37,7 +37,6 @@ CREATE TABLE IF NOT EXISTS session_state (
     topic_to_id INTEGER NOT NULL DEFAULT 0,
     topic_updated_at REAL NOT NULL DEFAULT 0,
     group_name TEXT NOT NULL DEFAULT '',
-    pending_not_shown INTEGER NOT NULL DEFAULT 0,
     updated_at REAL NOT NULL DEFAULT 0
 );
 
@@ -76,12 +75,11 @@ CREATE TABLE IF NOT EXISTS topic_segments (
     end_msg_id INTEGER NOT NULL DEFAULT 0,
     start_ts REAL NOT NULL DEFAULT 0,
     end_ts REAL NOT NULL DEFAULT 0,
-    summary TEXT NOT NULL DEFAULT '',
-    msg_count INTEGER NOT NULL DEFAULT 0,
-    created_at REAL NOT NULL DEFAULT 0
+    summary TEXT NOT NULL DEFAULT ''
 );
-CREATE INDEX IF NOT EXISTS idx_topic_segments_umo_end
-    ON topic_segments(umo, end_msg_id DESC);
+DROP INDEX IF EXISTS idx_topic_segments_umo_end;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_topic_segments_umo_end
+    ON topic_segments(umo, end_msg_id);
 """
 
 ALIAS_CACHE_TTL_SEC = 60.0
@@ -133,6 +131,13 @@ MESSAGE_COLUMNS = (
     "sender_id, sender_name, sender_card, text, ts, is_bot"
 )
 
+#: topic_segments 的读取列
+TOPIC_SEGMENT_COLUMNS = "id, umo, start_msg_id, end_msg_id, start_ts, end_ts, summary"
+
+#: 未读口径：游标之后、未撤回、非自身、实时抓到的行。用黑名单排除补账，
+#: 因为 AstrHe 会把已抓过的行改写成 source='live+backfill'，白名单会漏掉它们。
+UNREAD_ROW_CLAUSE = "umo=? AND recalled=0 AND is_bot=0 AND source!='backfill' AND id>?"
+
 
 def _row_to_message(r: sqlite3.Row) -> ChannelMessageRow:
     """把按 MESSAGE_COLUMNS 查出的一行转成信箱消息视图。"""
@@ -165,6 +170,12 @@ def parse_umo(umo: str) -> tuple[str, str, str]:
     if len(parts) != 3 or not parts[0] or not parts[1] or not parts[2]:
         return "", "", ""
     return parts[0], parts[1], parts[2]
+
+
+def is_group_umo(umo: str) -> bool:
+    """判断 UMO 是否群聊会话。"""
+    _, mtype, _ = parse_umo(umo)
+    return "group" in mtype.lower()
 
 
 class IrmiaStore:
@@ -477,14 +488,12 @@ class IrmiaStore:
                         )
                         async with self._lock:
                             conn = self._ensure_conn()
-                            conn.execute(
-                                """
-                                INSERT INTO session_state(umo, read_up_to_id, group_name, updated_at) VALUES(?, ?, ?, ?)
-                                ON CONFLICT(umo) DO UPDATE SET
-                                    group_name = CASE WHEN excluded.group_name != '' THEN excluded.group_name ELSE session_state.group_name END,
-                                    updated_at = excluded.updated_at
-                                """,
-                                (umo, init_read_id, group_name, now_ts),
+                            self._write_session_state(
+                                conn,
+                                umo,
+                                read_up_to_id=init_read_id,
+                                group_name=group_name,
+                                now_ts=now_ts,
                             )
                             conn.commit()
                     return 0
@@ -523,28 +532,48 @@ class IrmiaStore:
                 self._known_umos.add(umo)
                 if group_name:
                     self._group_names[umo] = group_name
-                init_read_id = int(cur.lastrowid) if first_seen and cur.lastrowid else 0
-                conn.execute(
-                    """
-                    INSERT INTO session_state(umo, read_up_to_id, group_name, updated_at)
-                    VALUES(?, ?, ?, ?)
-                    ON CONFLICT(umo) DO UPDATE SET
-                        group_name = CASE WHEN excluded.group_name != '' THEN excluded.group_name ELSE session_state.group_name END,
-                        updated_at = excluded.updated_at
-                    """,
-                    (umo, init_read_id, group_name, now_ts),
+                self._write_session_state(
+                    conn,
+                    umo,
+                    read_up_to_id=int(cur.lastrowid or 0) if first_seen else 0,
+                    group_name=group_name,
+                    now_ts=now_ts,
                 )
             conn.commit()
             return int(cur.lastrowid) if cur.lastrowid else 0
 
     # 信箱状态与消息查询
 
+    @staticmethod
+    def _write_session_state(
+        conn: sqlite3.Connection,
+        umo: str,
+        *,
+        read_up_to_id: int,
+        group_name: str,
+        now_ts: float,
+    ) -> None:
+        """写 session_state 行；已存在时只更新群名与时间，不动已读水位线。
+
+        调用方需自己持有 self._lock 并提交事务。
+        """
+        conn.execute(
+            """
+            INSERT INTO session_state(umo, read_up_to_id, group_name, updated_at)
+            VALUES(?, ?, ?, ?)
+            ON CONFLICT(umo) DO UPDATE SET
+                group_name = CASE WHEN excluded.group_name != '' THEN excluded.group_name ELSE session_state.group_name END,
+                updated_at = excluded.updated_at
+            """,
+            (umo, int(read_up_to_id), group_name, now_ts),
+        )
+
     async def get_session_state(self, umo: str) -> dict[str, Any]:
         """获取指定会话的已读水位线与话题状态。"""
         async with self._lock:
             conn = self._ensure_conn()
             row = conn.execute(
-                "SELECT umo, read_up_to_id, topic, topic_to_id, topic_updated_at, group_name, pending_not_shown "
+                "SELECT umo, read_up_to_id, topic, topic_to_id, topic_updated_at, group_name "
                 "FROM session_state WHERE umo=?",
                 (umo,),
             ).fetchone()
@@ -556,49 +585,30 @@ class IrmiaStore:
                     "topic_to_id": 0,
                     "topic_updated_at": 0.0,
                     "group_name": "",
-                    "pending_not_shown": 0,
                 }
             return dict(row)
 
-    async def update_read_state(
-        self,
-        umo: str,
-        *,
-        read_up_to_id: int | None = None,
-        pending_not_shown: int | None = None,
-    ) -> None:
-        """推进会话的已读水位线（只增不减）及未展示条数状态。"""
+    async def update_read_state(self, umo: str, *, read_up_to_id: int) -> None:
+        """推进会话的已读水位线（只增不减）。"""
         async with self._lock:
             conn = self._ensure_conn()
             row = conn.execute(
-                "SELECT read_up_to_id, pending_not_shown FROM session_state WHERE umo=?",
+                "SELECT read_up_to_id FROM session_state WHERE umo=?",
                 (umo,),
             ).fetchone()
             cur_read = int(row["read_up_to_id"]) if row else 0
-            cur_pending = int(row["pending_not_shown"]) if row else 0
-
-            new_read = (
-                max(cur_read, int(read_up_to_id))
-                if read_up_to_id is not None
-                else cur_read
-            )
-            new_pending = (
-                int(pending_not_shown)
-                if pending_not_shown is not None
-                else cur_pending
-            )
+            new_read = max(cur_read, int(read_up_to_id))
             now_ts = time.time()
             self._known_umos.add(umo)
             conn.execute(
                 """
-                INSERT INTO session_state(umo, read_up_to_id, pending_not_shown, updated_at)
-                VALUES(?, ?, ?, ?)
+                INSERT INTO session_state(umo, read_up_to_id, updated_at)
+                VALUES(?, ?, ?)
                 ON CONFLICT(umo) DO UPDATE SET
                     read_up_to_id=excluded.read_up_to_id,
-                    pending_not_shown=excluded.pending_not_shown,
                     updated_at=excluded.updated_at
                 """,
-                (umo, new_read, new_pending, now_ts),
+                (umo, new_read, now_ts),
             )
             conn.commit()
 
@@ -624,6 +634,27 @@ class IrmiaStore:
             )
             conn.commit()
 
+    async def update_topic_text(
+        self, umo: str, topic: str, updated_at: float | None = None
+    ) -> None:
+        """只更新那一句「在聊」，不动总结游标；没攒满一段的尾巴用它。"""
+        now_ts = updated_at if updated_at is not None else time.time()
+        async with self._lock:
+            conn = self._ensure_conn()
+            self._known_umos.add(umo)
+            conn.execute(
+                """
+                INSERT INTO session_state(umo, topic, topic_updated_at, updated_at)
+                VALUES(?, ?, ?, ?)
+                ON CONFLICT(umo) DO UPDATE SET
+                    topic=excluded.topic,
+                    topic_updated_at=excluded.topic_updated_at,
+                    updated_at=excluded.updated_at
+                """,
+                (umo, topic.strip(), now_ts, now_ts),
+            )
+            conn.commit()
+
     async def append_topic_segment(
         self,
         umo: str,
@@ -633,50 +664,27 @@ class IrmiaStore:
         start_ts: float,
         end_ts: float,
         summary: str,
-        msg_count: int = 0,
     ) -> None:
         """写入一段话题概括；同 umo 同 end_msg_id 覆盖不新增。"""
-        text = str(summary or "").strip()
-        if not umo or int(end_msg_id) <= 0 or not text:
-            return
-        now_ts = time.time()
         async with self._lock:
             conn = self._ensure_conn()
-            row = conn.execute(
-                "SELECT id FROM topic_segments WHERE umo=? AND end_msg_id=? "
-                "ORDER BY id DESC LIMIT 1",
-                (umo, int(end_msg_id)),
-            ).fetchone()
-            if row is not None:
-                conn.execute(
-                    "UPDATE topic_segments SET start_msg_id=?, start_ts=?, end_ts=?, "
-                    "summary=?, msg_count=?, created_at=? WHERE id=?",
-                    (
-                        int(start_msg_id),
-                        float(start_ts),
-                        float(end_ts),
-                        text,
-                        int(msg_count),
-                        now_ts,
-                        int(row["id"]),
-                    ),
-                )
-            else:
-                conn.execute(
-                    "INSERT INTO topic_segments(umo, start_msg_id, end_msg_id, "
-                    "start_ts, end_ts, summary, msg_count, created_at) "
-                    "VALUES(?,?,?,?,?,?,?,?)",
-                    (
-                        umo,
-                        int(start_msg_id),
-                        int(end_msg_id),
-                        float(start_ts),
-                        float(end_ts),
-                        text,
-                        int(msg_count),
-                        now_ts,
-                    ),
-                )
+            conn.execute(
+                "INSERT INTO topic_segments(umo, start_msg_id, end_msg_id, start_ts, end_ts, summary) "
+                "VALUES(?,?,?,?,?,?) "
+                "ON CONFLICT(umo, end_msg_id) DO UPDATE SET "
+                "start_msg_id=excluded.start_msg_id, "
+                "start_ts=excluded.start_ts, "
+                "end_ts=excluded.end_ts, "
+                "summary=excluded.summary",
+                (
+                    umo,
+                    int(start_msg_id),
+                    int(end_msg_id),
+                    float(start_ts),
+                    float(end_ts),
+                    str(summary or "").strip(),
+                ),
+            )
             conn.commit()
 
     def list_topic_segments(
@@ -685,9 +693,8 @@ class IrmiaStore:
         """取 end_msg_id > after_id 的段，最新的在前。"""
         conn = self._ensure_conn()
         rows = conn.execute(
-            "SELECT id, umo, start_msg_id, end_msg_id, start_ts, end_ts, summary, msg_count "
-            "FROM topic_segments WHERE umo=? AND end_msg_id>? "
-            "ORDER BY end_msg_id DESC LIMIT ?",
+            f"SELECT {TOPIC_SEGMENT_COLUMNS} FROM topic_segments "
+            "WHERE umo=? AND end_msg_id>? ORDER BY end_msg_id DESC LIMIT ?",
             (umo, int(after_id), int(limit)),
         ).fetchall()
         return [dict(r) for r in rows]
@@ -705,8 +712,7 @@ class IrmiaStore:
         """按段编号取一段，不存在返回 None。"""
         conn = self._ensure_conn()
         row = conn.execute(
-            "SELECT id, umo, start_msg_id, end_msg_id, start_ts, end_ts, summary, msg_count "
-            "FROM topic_segments WHERE id=?",
+            f"SELECT {TOPIC_SEGMENT_COLUMNS} FROM topic_segments WHERE id=?",
             (int(segment_id),),
         ).fetchone()
         return dict(row) if row is not None else None
@@ -716,9 +722,7 @@ class IrmiaStore:
         self._unseen_bot_umos.discard(umo)
         latest_id = self.get_latest_message_id(umo)
         if latest_id > 0:
-            await self.update_read_state(
-                umo, read_up_to_id=latest_id, pending_not_shown=0
-            )
+            await self.update_read_state(umo, read_up_to_id=latest_id)
 
     def get_latest_message_id(self, umo: str) -> int:
         """获取某会话当前最新一条消息的行 ID。"""
@@ -731,13 +735,18 @@ class IrmiaStore:
 
     def count_unread(self, umo: str, read_up_to_id: int) -> int:
         """数游标之后实时抓到的非 bot 消息，补账不算。"""
-        _, mtype, _ = parse_umo(umo)
-        if mtype and "group" not in mtype.lower():
+        if not is_group_umo(umo):
             return 0
         db_conn, table = self._select_source_for_umo(umo)
-        row = db_conn.execute(
-            f"SELECT COUNT(*) AS cnt FROM {table} "
-            "WHERE umo=? AND recalled=0 AND is_bot=0 AND source='live' AND id>?",
+        return self._count_unread_on(db_conn, table, umo, read_up_to_id)
+
+    @staticmethod
+    def _count_unread_on(
+        conn: sqlite3.Connection, table: str, umo: str, read_up_to_id: int
+    ) -> int:
+        """在指定连接与消息表上数未读；count_unread 与 list_sessions 共用一处口径。"""
+        row = conn.execute(
+            f"SELECT COUNT(*) AS cnt FROM {table} WHERE {UNREAD_ROW_CLAUSE}",
             (umo, int(read_up_to_id)),
         ).fetchone()
         return int(row["cnt"] or 0) if row else 0
@@ -770,7 +779,12 @@ class IrmiaStore:
         params.append(int(limit))
         rows = db_conn.execute(sql, tuple(params)).fetchall()
         result = [_row_to_message(r) for r in (rows if asc else reversed(rows))]
-        if table == "messages" and before_id is None and umo in self._pending_bot_speeches:
+        if (
+            table == "messages"
+            and not asc
+            and before_id is None
+            and umo in self._pending_bot_speeches
+        ):
             wall_now = time.time()
             pid, mtype, sid = parse_umo(umo)
             for recorded_at, sp_ts, sp_sender, sp_text in self._pending_bot_speeches.get(umo, []):
@@ -831,8 +845,10 @@ class IrmiaStore:
         self._pending_bot_speeches.pop(umo, None)
         self._unseen_bot_umos.discard(umo)
 
-    async def list_sessions(self, day_start_ts: float | None = None) -> list[SessionSummary]:
-        """聚合会话摘要；给 day_start_ts 时顺带算今天与历史段数。"""
+    async def list_sessions(
+        self, day_start_ts: float | None = None, *, include_unread: bool = False
+    ) -> list[SessionSummary]:
+        """聚合会话摘要；给 day_start_ts 时算今天与历史段数，include_unread 时顺带数未读条数。"""
         async with self._lock:
             conn = self._ensure_conn()
             state_rows = conn.execute("SELECT * FROM session_state").fetchall()
@@ -851,7 +867,7 @@ class IrmiaStore:
                     FROM {table} m
                     INNER JOIN (
                         SELECT umo, MAX(id) AS max_id, COUNT(*) AS total_cnt,
-                               SUM(CASE WHEN source = 'live' THEN 1 ELSE 0 END) AS live_cnt,
+                               SUM(CASE WHEN source != 'backfill' THEN 1 ELSE 0 END) AS live_cnt,
                                MAX(CASE WHEN is_bot = 1 THEN ts END) AS my_last_ts
                         FROM {table}
                         WHERE recalled=0
@@ -884,26 +900,23 @@ class IrmiaStore:
                 group_name = str(st.get("group_name", "") or "")
                 pid, mtype, sid = parse_umo(umo)
                 eff_mtype = mtype or str(r["message_type"] or "")
+                is_group = "group" in eff_mtype.lower()
 
-                if "group" in eff_mtype.lower():
-                    u_row = dbc.execute(
-                        f"SELECT COUNT(*) AS unread FROM {table} "
-                        "WHERE umo=? AND recalled=0 AND is_bot=0 AND source='live' AND id>?",
-                        (umo, read_up_to_id),
-                    ).fetchone()
-                    unread = int(u_row["unread"] or 0) if u_row else 0
-                else:
-                    unread = 0
+                unread = (
+                    self._count_unread_on(dbc, table, umo, read_up_to_id)
+                    if include_unread and is_group
+                    else 0
+                )
 
                 today_segments = 0
                 history_segments = 0
-                if "group" in eff_mtype.lower() and day_start_ts is not None:
+                if is_group and day_start_ts is not None:
                     seg_row = conn.execute(
                         "SELECT "
-                        "SUM(CASE WHEN end_ts>=? AND end_msg_id>? THEN 1 ELSE 0 END) AS today_cnt, "
-                        "SUM(CASE WHEN end_msg_id<=? THEN 1 ELSE 0 END) AS hist_cnt "
+                        "SUM(CASE WHEN end_ts>=? THEN 1 ELSE 0 END) AS today_cnt, "
+                        "SUM(CASE WHEN end_ts<? THEN 1 ELSE 0 END) AS hist_cnt "
                         "FROM topic_segments WHERE umo=?",
-                        (day_start_ts, read_up_to_id, read_up_to_id, umo),
+                        (day_start_ts, day_start_ts, umo),
                     ).fetchone()
                     today_segments = int(seg_row["today_cnt"] or 0) if seg_row else 0
                     history_segments = int(seg_row["hist_cnt"] or 0) if seg_row else 0

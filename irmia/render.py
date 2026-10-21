@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Sequence
 from zoneinfo import ZoneInfo
 
-from .store import SessionSummary, parse_umo
+from .store import SessionSummary, is_group_umo, parse_umo
 
 SELF_BRIEF_HEADER = "=== [IRMIA] 你现在的处境 ==="
 
@@ -93,6 +93,7 @@ def build_self_brief(
     intercept_direct_reply: bool = False,
     topic_max_chars: int = 24,
     mention_inline: bool = True,
+    segment_msg_count: int = 25,
 ) -> str:
     """拼接注入主脑的静态装置自述，放在 system_prompt 稳定前缀里。
 
@@ -100,6 +101,7 @@ def build_self_brief(
         intercept_direct_reply: 已发到当前窗口时是否收起末尾回复。
         topic_max_chars: 清单里话题的字数上限。
         mention_inline: 点名通知是否已内嵌消息与前后文。
+        segment_msg_count: 群消息切成一段需要多少条。
 
     Returns:
         装置自述文本。
@@ -131,7 +133,7 @@ def build_self_brief(
             else "- 群里被 @ 或被叫到名字，通知只告诉你有人在叫你。先用 read_channel 看前后文，再决定接不接。",
             "",
             "群消息：",
-            "- 信箱给段数，不给条数。一段 25 条，带一句总结。",
+            f"- 清单给段数，点名通知说那边攒了多少条。一段 {segment_msg_count} 条，带一句总结。",
             f"- 群里没叫你的消息只记成未读，不叫醒你。清单里有段数和一句 {topic_max_chars} 字以内的话题。",
             "- 想看用 read_channel(sid=...)。",
             "",
@@ -158,9 +160,9 @@ def render_session_list(
         kind_label = CHAT_TYPE_LABELS.get(mtype, mtype or "会话")
         where = resolve_where_fn(s)
         when = format_local_stamp(s.last_ts, tz_name)
-        unread_part = (
+        segment_part = (
             f"｜今天 {s.today_segments} 段 / 历史 {s.history_segments} 段"
-            if "group" in (mtype or "").lower()
+            if is_group_umo(s.umo)
             else ""
         )
         topic_part = f"｜在聊：{s.topic}" if s.topic.strip() else ""
@@ -170,7 +172,7 @@ def render_session_list(
             else "｜我还没在这说过话"
         )
         lines.append(
-            f"- {kind_label} · {where}｜sid {s.umo}｜最后 {when}{unread_part}{topic_part}{my_last_part}"
+            f"- {kind_label} · {where}｜sid {s.umo}｜最后 {when}{segment_part}{topic_part}{my_last_part}"
         )
     rest = (
         f"\n（还有 {len(sessions) - max_items} 个更早的会话没列出来。）"

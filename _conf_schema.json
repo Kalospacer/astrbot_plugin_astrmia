@@ -204,12 +204,6 @@
         "default": 24,
         "hint": "信箱里「在聊」那一句的上限。"
       },
-      "context_messages": {
-        "description": "看最近几条消息",
-        "type": "int",
-        "default": 25,
-        "hint": "每次概括给小模型看多少条。"
-      },
       "line_max_chars": {
         "description": "每条消息截多少字",
         "type": "int",

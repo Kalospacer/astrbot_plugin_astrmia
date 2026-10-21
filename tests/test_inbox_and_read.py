@@ -203,7 +203,7 @@ def test_render_mention_notice_and_session_list(tmp_path: Path) -> None:
             group_name="摸鱼群",
         )
         await store.update_topic(umo, "大家在打招呼", to_id=1)
-        sessions = await store.list_sessions()
+        sessions = await store.list_sessions(include_unread=True)
         rendered = render_session_list(sessions, lambda s: s.group_name)
         assert "摸鱼群｜sid aiocqhttp:GroupMessage:888888" in rendered
         assert "｜今天 0 段 / 历史 0 段｜在聊：大家在打招呼" in rendered
@@ -237,7 +237,7 @@ def test_session_list_shows_my_last_speech(tmp_path: Path) -> None:
             sender_id="888", text="在吗", ts=now - 120, **common,
         )
 
-        sessions = {s.umo: s for s in await store.list_sessions()}
+        sessions = {s.umo: s for s in await store.list_sessions(include_unread=True)}
         assert sessions[spoken_umo].my_last_ts == now - 3 * 3600
         assert sessions[silent_umo].my_last_ts == 0.0
 

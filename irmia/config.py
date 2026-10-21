@@ -84,7 +84,6 @@ class IrmiaConfig:
     vision_timeout_sec: int = 60
     vision_cache_ttl_days: int = 30
     topic_max_chars: int = 24
-    topic_context_messages: int = 25
     topic_line_max_chars: int = 120
     segment_rows_per_page: int = 10
     segment_msg_count: int = 25
@@ -262,7 +261,6 @@ def load_irmia_config(raw: dict[str, Any] | None) -> IrmiaConfig:
         vision_timeout_sec=_int("vision_timeout_sec", 60, minimum=1),
         vision_cache_ttl_days=_int("vision_cache_ttl_days", 30),
         topic_max_chars=_group_int("topic_options", "max_chars", 24),
-        topic_context_messages=_group_int("topic_options", "context_messages", 25),
         topic_line_max_chars=_group_int("topic_options", "line_max_chars", 120),
         segment_rows_per_page=_group_int("topic_options", "segment_rows_per_page", 10),
         segment_msg_count=_group_int("topic_options", "segment_msg_count", 25),

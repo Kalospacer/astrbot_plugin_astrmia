@@ -116,8 +116,7 @@ class TopicSummarizer:
         read_up_to_id = int(st.get("read_up_to_id", 0) or 0)
         topic_to_id = int(st.get("topic_to_id", 0) or 0)
         topic_updated_at = float(st.get("topic_updated_at", 0.0) or 0.0)
-        existing_topic = str(st.get("topic", "") or "")
-        latest_topic = existing_topic or None
+        latest_topic = str(st.get("topic", "") or "") or None
 
         now_ts = time.time()
         # 非点名强制触发时，先按上次实际尝试时间检查冷却与未读数（失败的尝试同样计入冷却）
@@ -141,52 +140,28 @@ class TopicSummarizer:
                 return latest_topic
             await self.store.set_kv(f"topic_attempted_at:{umo}", str(now_ts))
 
-            for _ in range(max(1, cfg.segment_backfill_max)):
-                rows = self.store.fetch_messages(
-                    umo,
-                    after_id=topic_to_id,
-                    limit=cfg.segment_msg_count,
-                    asc=True,
-                )
-                if len(rows) < cfg.segment_msg_count:
+            budget = max(1, cfg.segment_backfill_max)
+            window = max(1, cfg.segment_msg_count)
+            batch = self.store.fetch_messages(
+                umo, after_id=topic_to_id, limit=window * budget, asc=True
+            )
+            consumed = 0
+            for i in range(budget):
+                rows = batch[i * window : (i + 1) * window]
+                if len(rows) < window:
                     break
 
-                captions = {}
-                if cfg.topic_image_caption_enabled and self.captioner is not None:
-                    captions = await self.captioner.caption_rows(
-                        rows,
-                        wait_sec=cfg.vision_timeout_sec,
-                        max_new=cfg.read_channel_image_max,
-                    )
-
-                lines = []
-                for m in rows:
-                    raw = str(m.text or "").strip()
-                    if not raw:
-                        continue
-                    raw = render_with_captions(raw, captions_for(m, captions))
-                    lines.append(
-                        f"{alias_of(m)}: {raw.replace(chr(10), ' ')[: cfg.topic_line_max_chars]}"
-                    )
-
-                if not lines:
+                has_text, summary = await self._summarize_rows(
+                    rows, cfg, provider, alias_of
+                )
+                if not has_text:
                     # 整窗都是空文本，推过去，别卡在同一处
                     await self.store.update_topic(
-                        umo, existing_topic, rows[-1].id, now_ts
+                        umo, latest_topic or "", rows[-1].id, now_ts
                     )
                     topic_to_id = rows[-1].id
+                    consumed = (i + 1) * window
                     continue
-
-                resp = await asyncio.wait_for(
-                    provider.text_chat(
-                        prompt=build_topic_prompt(lines, cfg.topic_max_chars),
-                        session_id=f"irmia_topic_{uuid.uuid4().hex[:8]}",
-                        persist=False,
-                    ),
-                    timeout=cfg.light_timeout_sec,
-                )
-                raw_out = getattr(resp, "completion_text", "") or ""
-                summary = parse_topic_from_text(raw_out, cfg.topic_max_chars)
                 if not summary:
                     break
 
@@ -197,17 +172,70 @@ class TopicSummarizer:
                     start_ts=rows[0].ts,
                     end_ts=rows[-1].ts,
                     summary=summary,
-                    msg_count=len(lines),
                 )
                 await self.store.update_topic(umo, summary, rows[-1].id, now_ts)
                 topic_to_id = rows[-1].id
+                consumed = (i + 1) * window
                 latest_topic = summary
+
+            # 没攒满一段的尾巴照样更新「在聊」，但不推总结游标，下次还能凑满整段
+            tail = batch[consumed:]
+            if tail:
+                has_text, tail_topic = await self._summarize_rows(
+                    tail, cfg, provider, alias_of
+                )
+                if has_text and tail_topic:
+                    await self.store.update_topic_text(umo, tail_topic, now_ts)
+                    latest_topic = tail_topic
             return latest_topic
         except Exception as exc:
             self.logger.debug(f"[IRMIA] 话题概括跳过 ({umo}): {exc!r}")
             return latest_topic
         finally:
             self._running_umos.discard(umo)
+
+    async def _summarize_rows(
+        self,
+        rows: list[ChannelMessageRow],
+        cfg: IrmiaConfig,
+        provider: Any,
+        alias_of: Callable[[ChannelMessageRow], str],
+    ) -> tuple[bool, str]:
+        """把一批消息压成一句话题。
+
+        Returns:
+            (有没有可概括的文本, 一句话题)；模型没给出结果时话题为空串。
+        """
+        captions: dict[int, list[str | None]] = {}
+        if cfg.topic_image_caption_enabled and self.captioner is not None:
+            captions = await self.captioner.caption_rows(
+                rows,
+                wait_sec=cfg.vision_timeout_sec,
+                max_new=cfg.read_channel_image_max,
+            )
+
+        lines = []
+        for m in rows:
+            raw = str(m.text or "").strip()
+            if not raw:
+                continue
+            raw = render_with_captions(raw, captions_for(m, captions))
+            lines.append(
+                f"{alias_of(m)}: {raw.replace(chr(10), ' ')[: cfg.topic_line_max_chars]}"
+            )
+        if not lines:
+            return False, ""
+
+        resp = await asyncio.wait_for(
+            provider.text_chat(
+                prompt=build_topic_prompt(lines, cfg.topic_max_chars),
+                session_id=f"irmia_topic_{uuid.uuid4().hex[:8]}",
+                persist=False,
+            ),
+            timeout=cfg.light_timeout_sec,
+        )
+        raw_out = getattr(resp, "completion_text", "") or ""
+        return True, parse_topic_from_text(raw_out, cfg.topic_max_chars) or ""
 
     async def resolve_provider(self, umo: str, light_provider_id: str) -> Any:
         """取 light_provider_id，取不到回退当前会话的默认模型。"""

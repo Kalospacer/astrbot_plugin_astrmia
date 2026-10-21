@@ -1,6 +1,6 @@
 name: astrbot_plugin_astrmia
 display_name: AstrMia
-desc: AstrMia 插件
+desc: 所有私聊和群聊共用同一段记忆，群消息先攒着不打断，没人说话时她自己醒来看看。可配合 AstrHe 使用。
 version: v0.1.0
 author: Kalo & Qingyi
 repo: https://github.com/Kalospacer/astrbot_plugin_astrmia
