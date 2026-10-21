@@ -1,4 +1,4 @@
-"""连续概率呼吸心跳模型（复刻 I.R.M.I.A src/wake/heartbeat.ts）。
+"""连续概率心跳模型：按安静时长抽签决定何时醒来。
 
 模型定义：
     q = clamp01((quiet_ms - floor_ms) / (ceil_ms - floor_ms))
@@ -247,7 +247,7 @@ class HeartbeatEngine:
         )
 
     def sample_tick(self, now_ms: float | None = None) -> HeartbeatFiring | None:
-        """执行一次 tick 抽签：命中则推进周期起点并返回 HeartbeatFiring，未命中返回 None。"""
+        """执行一次抽签；命中就推进周期起点并返回结果，未命中返回 None。"""
         now = now_ms if now_ms is not None else self._now_ms()
         elapsed = max(0.0, now - self.cycle_start_ms)
         prob = heartbeat_probability(

@@ -1,4 +1,4 @@
-"""装置自述（SELF_BRIEF）、此刻层外部会话清单与群聊半遮面通知卡渲染（复刻 I.R.M.I.A src/model/self-brief.ts & render.ts）。"""
+"""装置自述、此刻层会话清单与群点名通知卡的渲染。"""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ _CST_FALLBACK = timezone(timedelta(hours=8), "CST")
 
 
 def resolve_tz(tz_name: str = "Asia/Shanghai") -> tuple[tzinfo, str]:
-    """统一解析时区名称，当环境缺少 tzdata 时对东八区安全回退至 UTC+08:00，杜绝时区标签与实际偏移不一致。
+    """解析时区；缺 tzdata 时东八区回退 UTC+08:00。
 
     Args:
         tz_name: IANA 时区名称。
@@ -51,7 +51,7 @@ def format_local_stamp(ts: float, tz_name: str = "Asia/Shanghai") -> str:
 def format_short_time(
     ts: float, tz_name: str = "Asia/Shanghai", always_hm_only: bool = False
 ) -> str:
-    """将时间戳格式化为本机时区的短时间（当天或 always_hm_only=True 时返回 HH:MM，跨天返回 MM-DD HH:MM）。"""
+    """格式化为 HH:MM；跨天时带 MM-DD。"""
     if ts <= 0:
         return "--:--"
     tz, _ = resolve_tz(tz_name)
@@ -62,7 +62,7 @@ def format_short_time(
 
 
 def format_ago(seconds: float) -> str:
-    """把距今秒数格式化为『N 分钟前 / N 小时前 / N 天前』，不足一分钟为『刚刚』。"""
+    """把距今秒数写成 N 分钟前 / N 小时前 / N 天前。"""
     minutes = int(max(0.0, seconds) // 60)
     if minutes < 1:
         return "刚刚"
@@ -94,47 +94,48 @@ def build_self_brief(
     topic_max_chars: int = 24,
     mention_inline: bool = True,
 ) -> str:
-    """生成注入给主脑的 IRMIA 静态装置自述说明（放入 system_prompt 稳定前缀以保护 Prompt Cache）。
+    """拼接注入主脑的静态装置自述，放在 system_prompt 稳定前缀里。
 
     Args:
-        intercept_direct_reply: 是否开启了『工具已发到当前窗口时收起末尾回复』开关。
-        topic_max_chars: 信箱清单里话题简报的字数上限。
-        mention_inline: 群点名通知是否已内嵌消息与前后文。
+        intercept_direct_reply: 已发到当前窗口时是否收起末尾回复。
+        topic_max_chars: 清单里话题的字数上限。
+        mention_inline: 点名通知是否已内嵌消息与前后文。
 
     Returns:
-        装置自述文本块。
+        装置自述文本。
     """
     reply_rules = [
         "- 谁叫醒你，你直接写的字就回给谁。",
-        "- 不想回，就只写 [SILENT]，这句不会发出去。",
-        "- 想给别的群或别的人发消息，用 send_message_to_user，session 填对方的 sid。",
-        "- 心跳醒来时没人在等你，直接写的字谁也收不到。想说话只能用 send_message_to_user。",
+        "- 不想回，只写 [SILENT]，这句不会发出去。",
+        "- 给别的群或别的人发消息用 send_message_to_user，session 填对方的 sid。",
+        "- 心跳醒来时没人在等你，直接写的字谁也收不到，想说话只能用 send_message_to_user。",
     ]
     if intercept_direct_reply:
         reply_rules.append(
-            "- 这一轮已经用 send_message_to_user 发到了叫醒你的这个会话，后面直接写的字就不再发了，免得同一句说两遍。"
+            "- 已经用 send_message_to_user 发到了叫醒你的会话，后面直接写的字就不再发。"
         )
 
     return "\n".join(
         [
             SELF_BRIEF_HEADER,
-            "QQ 上所有的私聊和群聊都连到同一个你，记忆是连着的。每个会话有一个 sid，写在下面的会话清单里。",
+            "所有私聊和群聊接到同一个你，记忆连着。每个会话有一个 sid，在下面的会话清单里。",
             "",
             "怎么说话：",
             *reply_rules,
             "",
             "要不要回：",
-            "- 管理员私聊你，基本都要回。",
-            "- 别人和群里的消息你都看得到，但不欠谁一句回复。跟你无关、或者不想理，可以不回。",
-            "- 在群里被 @ 或被叫到名字时，通知里已经附上了叫你的那几句和前后文，看完就能决定接不接。不够的话再用 read_channel 往前翻。"
+            "- 管理员私聊，基本都要回。",
+            "- 别人的消息和群消息你看得到，但不欠谁回复。跟你无关或不想理，可以不回。",
+            "- 群里被 @ 或被叫到名字，通知里附了叫你的那几句和前后文，看完决定接不接；不够再用 read_channel 翻。"
             if mention_inline
-            else "- 在群里被 @ 或被叫到名字时，通知只告诉你有人在叫你。先用 read_channel 看看在聊什么，再决定接不接。",
+            else "- 群里被 @ 或被叫到名字，通知只告诉你有人在叫你。先用 read_channel 看前后文，再决定接不接。",
             "",
             "群消息：",
-            f"- 群里没叫你的消息不会叫醒你，只记成未读。会话清单里能看到未读数，还有一句 {topic_max_chars} 字以内的话题。",
-            "- 想看就用 read_channel(sid=...)，消息不会丢。",
+            "- 信箱给段数，不给条数。一段 25 条，带一句总结。",
+            f"- 群里没叫你的消息只记成未读，不叫醒你。清单里有段数和一句 {topic_max_chars} 字以内的话题。",
+            "- 想看用 read_channel(sid=...)。",
             "",
-            "管理员不在线很正常，多半是在忙或者在睡。心跳醒来想找人说话，或者觉得哪个群有意思，可以用 send_message_to_user 过去说一句。",
+            "管理员不在线多半是在忙或在睡。心跳醒来想说话，或者觉得哪个群有意思，用 send_message_to_user 过去说。",
         ]
     )
 
@@ -146,7 +147,7 @@ def render_session_list(
     max_items: int = 8,
     now_ts: float | None = None,
 ) -> str:
-    """渲染此刻层的外部会话信箱清单（复刻 self-brief.ts renderSessionList），行尾标出我上次在该会话说话距今多久。"""
+    """渲染会话清单，行尾带段数与「我上次在这说话」。"""
     if not sessions:
         return "外部会话：还没收到过任何外部消息。"
     now = now_ts if now_ts is not None else datetime.now(tz=timezone.utc).timestamp()
@@ -157,10 +158,12 @@ def render_session_list(
         kind_label = CHAT_TYPE_LABELS.get(mtype, mtype or "会话")
         where = resolve_where_fn(s)
         when = format_local_stamp(s.last_ts, tz_name)
-        unread_part = f"｜{s.unread} 条未读" if s.unread > 0 else ""
-        topic_part = (
-            f"｜在聊：{s.topic}" if (s.unread > 0 and s.topic.strip()) else ""
+        unread_part = (
+            f"｜今天 {s.today_segments} 段 / 历史 {s.history_segments} 段"
+            if "group" in (mtype or "").lower()
+            else ""
         )
+        topic_part = f"｜在聊：{s.topic}" if s.topic.strip() else ""
         my_last_part = (
             f"｜我上次在这说话：{format_ago(now - s.my_last_ts)}"
             if s.my_last_ts > 0
@@ -205,7 +208,7 @@ def render_mention_notice(
     unread: int,
     topic: str,
 ) -> str:
-    """生成群聊被 @ 或被提及时的点名通知（复刻 self-brief.ts renderMentionNote）。"""
+    """生成群点名的半遮面通知。"""
     head = _mention_head(where_name, caller_name, is_at, at_label)
     talking = _talking(topic)
 

@@ -1,4 +1,4 @@
-"""插件配置解析与动态读取封装。"""
+"""插件配置的解析与热读取。"""
 
 from __future__ import annotations
 
@@ -6,14 +6,13 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
-DEFAULT_HEARTBEAT_PROMPT = """[心跳] 已经 {quiet_min} 分钟没人私聊你、也没人在群里叫你了。这是这段时间里你第 {idle_ticks} 次自己醒来。
+DEFAULT_HEARTBEAT_PROMPT = """[心跳] 已经 {quiet_min} 分钟没人私聊你、也没人在群里叫你了。这是第 {idle_ticks} 次自己醒来。
 
-趁现在有空，理一理今天：
-1. 看看待办和今天的规划。规划没印象就用 astrhe_read_plan 看全文，待办的备注和日期用 astrhe_read_todos 看。答应过别人、或者自己说过要做的事，挑一件现在就能做的去做，做完用 astrhe_todo_update 记一笔。已经过时的标成放弃。
-2. 聊天里冒出来的新约定还没记，就用 astrhe_todo_add 记下来，挂到用得上它的会话。计划变了，用 astrhe_todo_edit 或 astrhe_plan_edit 改。
-3. 现在做不了、得晚点做的事，用 astrhe_schedule 定个时间，到点会叫醒你。别只记在脑子里。
-4. 然后去看看在意的人和群。会话清单里写着你上次在每个地方说话是多久以前，想知道他们在聊什么就用 read_channel 翻一翻。有能接的话、想分享的事，或者很久没去打招呼了，就用 send_message_to_user 说一句。一次只说一件事、只发一条，发完就等，别追问。
-5. 对方在忙、在睡，或者你刚在那边说过话，就安静结束这一拍。"""
+1. 对一遍待办和规划。规划用 astrhe_read_plan，待办用 astrhe_read_todos。答应过别人的事挑一件现在能做的做，做完用 astrhe_todo_update 记一笔；过时的标成放弃。
+2. 聊天里冒出来的新约定用 astrhe_todo_add 记下，挂到用得上它的会话。计划变了用 astrhe_todo_edit 或 astrhe_plan_edit 改。
+3. 现在做不了的用 astrhe_schedule 定个时间，到点会叫醒你。
+4. 看会话清单，用 read_channel 翻你在意的群和人。有能接的话就用 send_message_to_user 说一句，一次一件事、只发一条，发完就等。
+5. 对方在忙在睡，或者你刚在那边说过话，安静结束这一拍。"""
 
 
 def _coerce_number(
@@ -87,6 +86,9 @@ class IrmiaConfig:
     topic_max_chars: int = 24
     topic_context_messages: int = 25
     topic_line_max_chars: int = 120
+    segment_rows_per_page: int = 10
+    segment_msg_count: int = 25
+    segment_backfill_max: int = 5
     light_timeout_sec: int = 10
     wake_summary_max_chars: int = 60
     heartbeat_tick_sec: int = 60
@@ -96,7 +98,7 @@ class IrmiaConfig:
 
 
 def parse_contacts_map(raw_list: Any) -> dict[str, str]:
-    """解析形如 ['123456 = 老哥', 'aiocqhttp:GroupMessage:999 = 摸鱼群'] 的备注列表。
+    """解析『键 = 值』形式的备注列表。
 
     Args:
         raw_list: 原始配置中的列表或字典。
@@ -128,7 +130,7 @@ def parse_contacts_map(raw_list: Any) -> dict[str, str]:
 def normalize_heartbeat_mins(
     floor_min: int, ceil_min: int, target_mean_min: int
 ) -> tuple[int, int, int]:
-    """统一归一化心跳的 floor / ceil / target_mean 分钟数，确保落在合法开区间内。"""
+    """归一化心跳的 floor / ceil / target_mean，保证落在合法开区间。"""
     f_min = max(1, int(floor_min))
     c_min = max(f_min + 2, int(ceil_min))
     t_min = max(f_min + 1, int(target_mean_min))
@@ -262,6 +264,9 @@ def load_irmia_config(raw: dict[str, Any] | None) -> IrmiaConfig:
         topic_max_chars=_group_int("topic_options", "max_chars", 24),
         topic_context_messages=_group_int("topic_options", "context_messages", 25),
         topic_line_max_chars=_group_int("topic_options", "line_max_chars", 120),
+        segment_rows_per_page=_group_int("topic_options", "segment_rows_per_page", 10),
+        segment_msg_count=_group_int("topic_options", "segment_msg_count", 25),
+        segment_backfill_max=_group_int("topic_options", "segment_backfill_max", 5),
         light_timeout_sec=_group_int("topic_options", "timeout_sec", 10),
         wake_summary_max_chars=_group_int("wake_options", "summary_max_chars", 60),
         heartbeat_tick_sec=_group_int("wake_options", "tick_sec", 60),

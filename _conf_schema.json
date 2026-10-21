@@ -3,224 +3,242 @@
     "description": "总开关",
     "type": "bool",
     "default": true,
-    "hint": "关掉后插件什么都不管：群消息不进信箱、不自己醒来、不共用记忆。"
+    "hint": "关掉后群消息不进信箱、不自己醒来、不共用记忆。"
   },
   "master_umo": {
-    "description": "主脑会话",
+    "description": "记忆存在哪个会话",
     "type": "string",
     "default": "",
-    "hint": "她所有记忆存在哪个会话里，格式像 aiocqhttp:FriendMessage:你的QQ号。不填的话，第一个私聊机器人的管理员会被自动选上。"
+    "hint": "形如 aiocqhttp:FriendMessage:你的QQ号。留空自动选第一个私聊机器人的管理员。"
   },
   "mention_keywords": {
     "description": "她的称呼",
     "type": "list",
     "default": [],
-    "hint": "群里有人说到这些词（不分大小写），就算在叫她，会把她叫醒。没提到、也没 @ 她的消息只记成未读。"
+    "hint": "群里正文出现这些词就算在叫她，大小写不敏感。"
   },
   "contacts_map": {
-    "description": "联系人备注",
+    "description": "会话与联系人备注",
     "type": "list",
     "default": [],
-    "hint": "一行一条，写成「QQ号或群号 = 名字」，比如 12345678 = 老哥、987654321 = 摸鱼群。这里写的名字比 AstrHe 里的优先。"
+    "hint": "一行一条，写成 QQ号或群号 = 名字。优先于 AstrHe 关系本。"
   },
   "group_batch_enabled": {
-    "description": "群里连着叫她时，先等一会儿再叫醒",
+    "description": "群聊点名攒批",
     "type": "bool",
     "default": true,
-    "hint": "打开后，群友连着 @ 或提到她好几条，会先等几秒，凑齐了一起叫醒她。关掉就每条都马上叫醒。"
+    "hint": "群友连发几条时先等一会，凑齐一起叫醒。"
   },
   "private_batch_enabled": {
-    "description": "私聊连着发时，先等一会儿再叫醒",
+    "description": "私聊攒批",
     "type": "bool",
     "default": true,
-    "hint": "打开后，对方连着发好几条私聊，会先等几秒，凑齐了一起给她看。关掉就每条都马上叫醒。"
+    "hint": "私聊连发几条时先等一会，凑齐一起交给她。"
   },
   "group_batch_window_sec": {
-    "description": "等几秒",
+    "description": "攒批等待秒数",
     "type": "float",
     "default": 3,
-    "hint": "上面两个开关等待的秒数，群聊和私聊共用，可以写小数，比如 2.5。填 0 就不等。"
+    "hint": "群聊私聊共用，支持小数。填 0 不等。"
   },
   "mention_inline_enabled": {
-    "description": "群里叫她时，通知里直接附上聊天内容",
+    "description": "点名通知内嵌消息",
     "type": "bool",
     "default": true,
-    "hint": "打开后，通知里直接带上叫她的那几句和前后文，并标记已读，她不用再自己去翻。图片只用已经有的描述，不现等识别。关掉就只通知有人叫她，让她自己去读。"
+    "hint": "通知里直接带叫她的那几句和前后文并标记已读，省一次读群。"
   },
   "mention_inline_limit": {
-    "description": "通知里最多附几条消息",
+    "description": "内嵌最多几条",
     "type": "int",
     "default": 20,
-    "hint": "默认 20 条，最多 100 条。她自己说的话也算在里面。"
+    "hint": "默认 20，最多 100。她说的话也算在内。"
   },
   "light_provider_id": {
     "description": "小模型",
     "type": "string",
     "default": "",
     "_special": "select_provider",
-    "hint": "用来概括群里在聊什么，和写醒来小结。建议选便宜、快的小模型。不填就用当前的聊天模型。"
+    "hint": "用来概括群话题和写醒来摘要。建议选便宜的。"
   },
   "topic_min_unread": {
-    "description": "攒够几条未读才概括话题",
+    "description": "概括话题的未读门槛",
     "type": "int",
     "default": 5,
-    "hint": "一个群的未读攒到这么多条，并且过了冷却时间，就在后台概括一次在聊什么。"
+    "hint": "未读攒到这么多条且过冷却时间，后台概括一次。"
   },
   "topic_cooldown_sec": {
-    "description": "同一个群多久最多概括一次（秒）",
+    "description": "概括冷却秒数",
     "type": "int",
     "default": 180,
-    "hint": "防止很热闹的群一直调用小模型。从上次尝试开始算，失败了也要等。有人叫她的时候不受这个限制。"
+    "hint": "同一个群多久最多概括一次。从上次尝试算起，失败也算。被点名不受限。"
   },
   "heartbeat_enabled": {
     "description": "自己醒来",
     "type": "bool",
     "default": true,
-    "hint": "没人说话时，越久没人说话越容易醒，醒来后看看待办和大家在聊什么，想说话就去说。要先有主脑会话才会运行。"
+    "hint": "没人说话时按概率醒来，看群、看待办，想说话就说。"
   },
   "heartbeat_provider_id": {
-    "description": "自己醒来时用的模型",
+    "description": "醒来用的模型",
     "type": "string",
     "default": "",
     "_special": "select_provider",
-    "hint": "她自己醒来、或者被 /astrmia wake 叫醒时，思考和用工具都用这个模型。不填就跟主脑会话用同一个。填的模型被删了会自动换回主脑的模型，并记一条日志。醒来小结还是用上面的小模型。"
+    "hint": "不填跟主脑用同一个。填的模型不存在时回退主脑并打日志。"
   },
   "heartbeat_prompt": {
     "description": "醒来时对她说的话",
     "type": "text",
-    "default": "[心跳] 已经 {quiet_min} 分钟没人私聊你、也没人在群里叫你了。这是这段时间里你第 {idle_ticks} 次自己醒来。\n\n趁现在有空，理一理今天：\n1. 看看待办和今天的规划。规划没印象就用 astrhe_read_plan 看全文，待办的备注和日期用 astrhe_read_todos 看。答应过别人、或者自己说过要做的事，挑一件现在就能做的去做，做完用 astrhe_todo_update 记一笔。已经过时的标成放弃。\n2. 聊天里冒出来的新约定还没记，就用 astrhe_todo_add 记下来，挂到用得上它的会话。计划变了，用 astrhe_todo_edit 或 astrhe_plan_edit 改。\n3. 现在做不了、得晚点做的事，用 astrhe_schedule 定个时间，到点会叫醒你。别只记在脑子里。\n4. 然后去看看在意的人和群。会话清单里写着你上次在每个地方说话是多久以前，想知道他们在聊什么就用 read_channel 翻一翻。有能接的话、想分享的事，或者很久没去打招呼了，就用 send_message_to_user 说一句。一次只说一件事、只发一条，发完就等，别追问。\n5. 对方在忙、在睡，或者你刚在那边说过话，就安静结束这一拍。",
-    "hint": "可以用两个占位符：{quiet_min} 是多久没人私聊或在群里叫她了（分钟），{idle_ticks} 是这段时间第几次自己醒来。手动 /astrmia wake 不带备注时也用这段。不填就用默认的。"
+    "default": "[心跳] 已经 {quiet_min} 分钟没人私聊你、也没人在群里叫你了。这是第 {idle_ticks} 次自己醒来。\n\n1. 对一遍待办和规划。规划用 astrhe_read_plan，待办用 astrhe_read_todos。答应过别人的事挑一件现在能做的做，做完用 astrhe_todo_update 记一笔；过时的标成放弃。\n2. 聊天里冒出来的新约定用 astrhe_todo_add 记下，挂到用得上它的会话。计划变了用 astrhe_todo_edit 或 astrhe_plan_edit 改。\n3. 现在做不了的用 astrhe_schedule 定个时间，到点会叫醒你。\n4. 看会话清单，用 read_channel 翻你在意的群和人。有能接的话就用 send_message_to_user 说一句，一次一件事、只发一条，发完就等。\n5. 对方在忙在睡，或者你刚在那边说过话，安静结束这一拍。",
+    "hint": "支持 {quiet_min} 与 {idle_ticks}。留空用内置文案。"
   },
   "heartbeat_floor_min": {
-    "description": "最少安静多久才可能醒（分钟）",
+    "description": "最短安静分钟",
     "type": "int",
     "default": 5,
-    "hint": "安静不到这么久一定不醒，免得刚聊完又自己醒。"
+    "hint": "安静不到这么久一定不醒。"
   },
   "heartbeat_ceil_min": {
-    "description": "最多安静多久一定醒（分钟）",
+    "description": "最长安静分钟",
     "type": "int",
     "default": 60,
-    "hint": "安静到这么久一定会醒一次。"
+    "hint": "安静到这么久一定醒一次。"
   },
   "heartbeat_target_mean_min": {
-    "description": "平均多久醒一次（分钟）",
+    "description": "平均间隔分钟",
     "type": "int",
     "default": 15,
-    "hint": "要在上面两个数之间。改了以后插件会自动算出醒来的概率曲线。"
+    "hint": "要在上下限之间。改了会重算概率曲线。"
   },
   "heartbeat_quiet_enabled": {
     "description": "夜里不醒",
     "type": "bool",
     "default": false,
-    "hint": "打开后，设定的时段里她不会自己醒，像睡着了一样。进出这个时段时会把计时清零，早上醒来不会一睁眼就蹦起来。默认关闭。"
+    "hint": "时段内不抽签、不唤醒。进出时段会把计时归零。"
   },
   "heartbeat_quiet_start_hour": {
-    "description": "几点开始不醒（0-23）",
+    "description": "静默开始整点",
     "type": "int",
     "default": 22,
-    "hint": "按 AstrBot 设置的时区算。22 就是晚上 10 点开始。"
+    "hint": "按 AstrBot 时区算。"
   },
   "heartbeat_quiet_end_hour": {
-    "description": "几点恢复（0-23）",
+    "description": "静默结束整点",
     "type": "int",
     "default": 8,
-    "hint": "开始时间比结束时间大就是跨夜，比如 22 到 8 是晚上 10 点到第二天早上 8 点。两个数一样等于不启用。"
+    "hint": "开始大于结束表示跨夜。两值相同等于不启用。"
   },
   "image_keep_days": {
-    "description": "收到的图存几天",
+    "description": "图片留底天数",
     "type": "int",
     "default": 3,
-    "hint": "缩小后存在插件自己的目录里，过期就删。动图只存第一帧。填 0 就不再存新图。"
+    "hint": "缩小后存在插件目录，过期删除。动图只存第一帧。0 不存。"
   },
   "read_channel_image_enabled": {
-    "description": "读群时给图配一句描述",
+    "description": "读群时给图配描述",
     "type": "bool",
     "default": true,
-    "hint": "只识别这次读到的、存过的图，先查缓存。带表情名的小表情会跳过。"
+    "hint": "只识别本次展示的留底图，先查缓存。带表情名的小表情跳过。"
   },
   "read_channel_image_max": {
-    "description": "每次读群最多新识别几张图",
+    "description": "每次最多新识别几张",
     "type": "int",
     "default": 6,
-    "hint": "先识别最新的。缓存里有的不占名额。填 0 就只用缓存。"
+    "hint": "缓存命中的不占名额。0 只用缓存。"
   },
   "read_channel_image_wait_sec": {
-    "description": "读群时最多等识图几秒",
+    "description": "识图最多等几秒",
     "type": "int",
     "default": 8,
-    "hint": "没等到的先写「还没看清」，后台接着识别，下次读就有了。"
+    "hint": "没等到的标「还没看清」，后台继续识别。"
   },
   "image_brief_max_chars": {
-    "description": "图片一句话描述最多几个字",
+    "description": "图片一句话字数上限",
     "type": "int",
     "default": 80,
-    "hint": "读群和概括话题时用，一句话说图里有什么，包括看得清的关键字。"
+    "hint": "读群和概括话题共用。"
   },
   "read_image_max_chars": {
-    "description": "read_image 的回答最多几个字",
+    "description": "read_image 回答字数上限",
     "type": "int",
     "default": 500,
-    "hint": "不带问题就给详细描述，带了问题就只回答问题。两种结果分开缓存。"
+    "hint": "不带问题给详细描述，带问题只回答。"
   },
   "vision_provider_ids": {
-    "description": "识图用的模型（按顺序试）",
+    "description": "识图模型降级链",
     "type": "list",
     "default": [],
     "_special": "select_providers",
-    "hint": "按顺序填能看图的模型，每个最多试两次，不行就换下一个。不填就用小模型，小模型也没填就用当前的聊天模型。"
+    "hint": "按顺序尝试，每个最多两次。留空用小模型。"
   },
   "vision_timeout_sec": {
-    "description": "识一张图最多等几秒",
+    "description": "单次识图超时秒数",
     "type": "int",
     "default": 60,
-    "hint": "每次调用模型最多等这么久，超时就重试，再不行换下一个模型。看一张图有时要将近一分钟（会思考的模型更慢），设太小会白白重试。"
+    "hint": "超时算失败，重试或换下一个模型。带思考的视觉模型很慢，设太小会白跑。"
   },
   "topic_image_caption_enabled": {
-    "description": "概括话题时也给图配描述",
+    "description": "概括话题时给图配描述",
     "type": "bool",
     "default": true,
-    "hint": "跟读群共用缓存，不改聊天记录。关掉就只看文字。"
+    "hint": "和读群共用缓存，不写回账本。"
   },
   "vision_cache_ttl_days": {
-    "description": "图片描述多少天没用就删",
+    "description": "描述缓存保留天数",
     "type": "int",
     "default": 30,
-    "hint": "按最后一次用到的时间算，只删插件自己的缓存。填 0 就不删。启动时清一次，之后每小时清一次，关掉自己醒来也照样清。"
+    "hint": "按最后使用时间算，只清插件自己的缓存。0 不过期。"
   },
   "intercept_direct_reply": {
-    "description": "用工具回过话后，不再重复说",
+    "description": "用工具回过就收起末尾文字",
     "type": "bool",
     "default": false,
-    "hint": "打开后，如果她这一轮已经用 send_message_to_user 回过叫醒她的人，后面直接写的字就不再发了。只发给了别的群或别人时，照常发。关掉就始终照常发。不管开不开，只写 [SILENT] 都不会发出去。"
+    "hint": "本轮已发到叫醒她的会话，后面直接写的字不再发。单写 [SILENT] 始终静默。"
   },
   "topic_options": {
     "description": "话题概括",
     "type": "object",
     "items": {
       "max_chars": {
-        "description": "话题最多几个字",
+        "description": "话题字数上限",
         "type": "int",
         "default": 24,
-        "hint": "「那边在聊：XXX」这句话的字数上限。"
+        "hint": "信箱里「在聊」那一句的上限。"
       },
       "context_messages": {
         "description": "看最近几条消息",
         "type": "int",
         "default": 25,
-        "hint": "每次概括时，给小模型看这个群最近多少条消息。"
+        "hint": "每次概括给小模型看多少条。"
       },
       "line_max_chars": {
-        "description": "每条消息最多看几个字",
+        "description": "每条消息截多少字",
         "type": "int",
         "default": 120,
-        "hint": "太长的消息只留前面这么多字给小模型。"
+        "hint": "太长的部分截掉。"
       },
       "timeout_sec": {
-        "description": "小模型最多等几秒",
+        "description": "小模型超时秒数",
         "type": "int",
         "default": 10,
-        "hint": "概括话题和写醒来小结共用。"
+        "hint": "概括话题和写醒来摘要共用。"
+      },
+      "segment_rows_per_page": {
+        "description": "目录一次列几段",
+        "type": "int",
+        "default": 10,
+        "hint": "点开一个群时最先看到这么多段。越多越占上下文。"
+      },
+      "segment_msg_count": {
+        "description": "每几条消息切一段",
+        "type": "int",
+        "default": 25,
+        "hint": "每这么多条跑一次总结。改小切得更细，小模型调用更频繁。"
+      },
+      "segment_backfill_max": {
+        "description": "一次最多补几段",
+        "type": "int",
+        "default": 5,
+        "hint": "积压时每次触发最多补这么多段。"
       }
     }
   },
@@ -229,22 +247,22 @@
     "type": "object",
     "items": {
       "summary_max_chars": {
-        "description": "醒来小结最多几个字",
+        "description": "醒来摘要字数上限",
         "type": "int",
         "default": 60,
-        "hint": "这一拍用过工具，就用小模型写一句小结存进主脑记忆，这是字数上限。写失败就不写。"
+        "hint": "用过工具才写。写失败不写。"
       },
       "tick_sec": {
-        "description": "多久抽一次签（秒）",
+        "description": "抽签间隔秒数",
         "type": "int",
         "default": 60,
-        "hint": "每隔这么久决定一次要不要醒。改了以后插件会重新算概率，平均醒来的间隔不变。"
+        "hint": "每隔多久决定一次要不要醒。改了会重算概率，平均间隔不变。"
       },
       "max_steps": {
-        "description": "醒一次最多想几步",
+        "description": "一次醒来最多几步",
         "type": "int",
         "default": 32,
-        "hint": "一次醒来最多来回多少轮。模型回一次算一步，一步里可能用好几个工具，所以不等于工具次数。"
+        "hint": "一次回复算一步，一步可能调多个工具。"
       }
     }
   },
@@ -253,16 +271,16 @@
     "type": "object",
     "items": {
       "session_list_max": {
-        "description": "会话清单最多列几个",
+        "description": "清单最多列几个",
         "type": "int",
         "default": 8,
-        "hint": "每次给她看的会话清单，和 /astrmia status 里，最多列多少个会话。"
+        "hint": "会话清单和 /astrmia status 共用。"
       },
       "quote_preview_chars": {
-        "description": "引用消息留几个字",
+        "description": "引用预览字数",
         "type": "int",
         "default": 40,
-        "hint": "群消息引用了别人的话时，存进信箱的引用部分留多少字。"
+        "hint": "群消息引用别人时，记进信箱的引用部分留多少字。"
       }
     }
   }

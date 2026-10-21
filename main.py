@@ -1,4 +1,4 @@
-"""astrbot_plugin_astrmia 插件入口：薄入口，只负责装配 IrmiaRuntime 与注册事件钩子、管理员指令。"""
+"""插件入口：装配 IrmiaRuntime，注册钩子与管理员指令。"""
 
 from __future__ import annotations
 
@@ -35,18 +35,18 @@ class AstrMiaPlugin(Star):
         """插件卸载时停止心跳、回收后台任务并关闭数据库。"""
         await self.runtime.terminate()
 
-    # ---------------- 事件钩子 ----------------
+    # 事件钩子
 
     @filter.platform_adapter_type(
         filter.PlatformAdapterType.ALL, priority=sys.maxsize - 4
     )
     async def handle_incoming_message(self, event: AstrMessageEvent) -> None:
-        """在 AstrHe (maxsize-3) 记账之后执行信箱分流、群聊攒批与半遮面通知装配。"""
+        """AstrHe 记账后执行信箱分流、攒批与通知装配。"""
         await self.runtime.on_incoming_event(event)
 
     @filter.on_waiting_llm_request(priority=sys.maxsize - 4)
     async def handle_waiting_llm_request(self, event: AstrMessageEvent) -> None:
-        """在核心读取历史前排队取得主脑锁，避免多个会话同时改写共享主脑历史。"""
+        """读历史前取主脑锁。多会话同时改写会丢历史。"""
         await self.runtime.on_waiting_llm_request(event)
 
     @filter.on_llm_request(priority=sys.maxsize - 4)
@@ -56,7 +56,7 @@ class AstrMiaPlugin(Star):
 
     @filter.on_llm_response(priority=sys.maxsize - 4)
     async def handle_llm_response(self, event: AstrMessageEvent, resp: Any) -> None:
-        """标记当前事件已进入最终 LLM 回复阶段（用于区分调工具途中的过渡文字与最终回复）。"""
+        """标记已进入最终回复步。"""
         await self.runtime.on_llm_response(event, resp)
 
     @filter.on_llm_tool_respond()
@@ -67,14 +67,14 @@ class AstrMiaPlugin(Star):
         tool_args: Any,
         tool_result: Any,
     ) -> None:
-        """监听 send_message_to_user：标记是否已发到当前窗口并记入兜底账本。"""
+        """标记 send_message_to_user 是否已发到当前窗口，并记账。"""
         await self.runtime.on_llm_tool_respond(
             event, tool, tool_args, tool_result
         )
 
     @filter.on_decorating_result(priority=sys.maxsize - 4)
     async def handle_decorating_result(self, event: AstrMessageEvent) -> None:
-        """处理 [SILENT] 沉默权标记与可选的 intercept_direct_reply（工具已发到当前窗口时收起末尾回复）。"""
+        """处理 [SILENT] 与 intercept_direct_reply。"""
         await self.runtime.on_decorating_result(event)
 
     @filter.after_message_sent(priority=sys.maxsize - 4)
@@ -82,7 +82,7 @@ class AstrMiaPlugin(Star):
         """记录普通直出回复到兜底账本。"""
         await self.runtime.on_after_message_sent(event)
 
-    # ---------------- 管理员指令 ----------------
+    # 管理员指令
 
     @filter.command_group("astrmia")
     def astrmia_group(self) -> None:

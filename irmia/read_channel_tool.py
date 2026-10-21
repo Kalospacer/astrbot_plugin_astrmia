@@ -1,8 +1,7 @@
-"""read_channel 工具实现（复刻 I.R.M.I.A src/tools/admin.ts 的 read_channel 5 分支防刷屏与游标翻页语义）。"""
+"""read_channel 工具：段目录、段展开、游标翻页。"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from typing import Any, Callable, Sequence
 
 from pydantic import Field
@@ -24,7 +23,7 @@ except Exception:  # pragma: no cover - 单元测试无 AstrBot 环境时的轻�
 READ_CHANNEL_DEFAULT_LIMIT = 20
 READ_CHANNEL_PAGE_SIZE = 50
 READ_CHANNEL_MAX_LIMIT = 100
-READ_CHANNEL_MENTION_CONTEXT = 10
+READ_CHANNEL_SEGMENT_PAGE = 10
 
 SELF_SPEAK_LABEL = "（我）"
 MENTION_ROW_MARK = "▶ "
@@ -47,51 +46,6 @@ def _is_row_mentioning_me(
     return mentions_keyword(text, mention_keywords)
 
 
-@dataclass
-class DigestSelection:
-    """默认未读视图的精选结果。"""
-
-    items: list[ChannelMessageRow] = field(default_factory=list)
-    mentioned_ids: set[int] = field(default_factory=set)
-
-
-def select_mention_digest(
-    pool: Sequence[ChannelMessageRow],
-    prev_read_id: int,
-    limit: int,
-    bot_self_ids: set[str],
-    mention_keywords: Sequence[str],
-    own_trigger_idx: int | None = None,
-) -> DigestSelection:
-    """从消息池中挑选未读里『点到她的那些行（及她刚发出的触发点）+ 每条之前 10 条上下文』。"""
-    mentioned_ids: set[int] = set()
-    trigger_indices: list[int] = []
-
-    for idx, item in enumerate(pool):
-        if own_trigger_idx is not None and idx == own_trigger_idx:
-            trigger_indices.append(idx)
-            continue
-        if item.id <= prev_read_id:
-            continue
-        if _is_row_mentioning_me(item, bot_self_ids, mention_keywords):
-            mentioned_ids.add(item.id)
-            trigger_indices.append(idx)
-
-    if not trigger_indices:
-        return DigestSelection(items=[], mentioned_ids=mentioned_ids)
-
-    selected_indices: set[int] = set()
-    for t_idx in trigger_indices:
-        start = max(0, t_idx - READ_CHANNEL_MENTION_CONTEXT)
-        for i in range(start, t_idx + 1):
-            selected_indices.add(i)
-
-    ordered = [pool[i] for i in sorted(selected_indices)]
-    if len(ordered) > limit:
-        ordered = ordered[-limit:]
-    return DigestSelection(items=ordered, mentioned_ids=mentioned_ids)
-
-
 def _paging_footer(
     next_before: int, more: bool, page_size: int = READ_CHANNEL_PAGE_SIZE
 ) -> str:
@@ -110,6 +64,8 @@ async def execute_read_channel(
     sid: str,
     before: int | None = None,
     limit: int | None = None,
+    segment: int | None = None,
+    segment_page: int = READ_CHANNEL_SEGMENT_PAGE,
     contacts_map: dict[str, str] | None = None,
     mention_keywords: Sequence[str] = (),
     bot_self_ids: set[str] | None = None,
@@ -174,7 +130,40 @@ async def execute_read_channel(
             lines.append(f"{prefix}[{stamp} #{r.id}] {who}: {body}")
         return lines
 
-    # ── ① 翻页模式：给 before 游标 -> 读历史，一页默认 50 条，绝不修改已读水位线 ──
+    # 展开某段，不动已读
+    if segment is not None:
+        seg_id = int(segment)
+        seg = store.get_topic_segment(seg_id)
+        if seg is None:
+            return f"没有段 {seg_id}。检查编号，或者不带 segment 再读一次看目录。"
+        if str(seg["umo"]) != target_sid:
+            return f"段 {seg_id} 属于 {seg['umo']}，不是这个会话。"
+        start_id = int(seg["start_msg_id"])
+        end_id = int(seg["end_msg_id"])
+        rows = store.fetch_messages(
+            target_sid,
+            after_id=start_id - 1,
+            limit=max(1, end_id - start_id + 1),
+            asc=True,
+        )
+        if not rows:
+            return f"段 {seg_id} 的原文不在了。"
+        where_label = store.resolve_session_name(
+            target_sid, group_name, "", "", cmap
+        )
+        captions = await captioner.caption_rows(
+            rows, wait_sec=caption_wait_sec, max_new=caption_max_new
+        ) if captioner else {}
+        return "\n".join(
+            [
+                f"{target_sid} · {where_label}",
+                f"段 {seg_id}，{len(rows)} 条",
+                "",
+                *_render_rows(rows, set(), captions),
+            ]
+        )
+
+    # 翻页，不改已读
     if is_paging:
         cursor_before = int(before)  # type: ignore[arg-type]
         batch = store.fetch_messages(
@@ -208,7 +197,7 @@ async def execute_read_channel(
         ) if captioner else {}
         return "\n".join([header, *_render_rows(batch, mentioned, captions), footer])
 
-    # ── 默认模式：读取最近消息池 ──
+    # 默认模式：读消息池
     pool_size = max(eff_limit * 4, 100)
     pool = store.fetch_messages(target_sid, limit=pool_size)
     if not pool:
@@ -217,40 +206,23 @@ async def execute_read_channel(
         )
 
     prev_read_id = int(st.get("read_up_to_id", 0) or 0)
-    prev_pending = int(st.get("pending_not_shown", 0) or 0)
-    fetch_floor = pool[0].id
     newest_id = pool[-1].id
     has_unseen_own = store.has_unseen_bot_speech(target_sid)
 
-    # 未读外部消息只按非 bot 消息与 prev_read_id 比较，彻底避免已读过的 is_bot=1 消息卡在 prev_read_id 之上当钉子户
+    # 未读外部消息只按非 bot 消息与 prev_read_id 比较，避开已读过的 is_bot=1 消息卡在游标之上
     ext_unread = (
         [m for m in pool if not m.is_bot]
         if prev_read_id == 0
         else [m for m in pool if (not m.is_bot) and m.id > prev_read_id]
     )
-    # 仅当处于消息池最末尾的最新一条消息是尚未核对的自身发言时，才将其作为触发点（避免截断后续新到的外部消息）
+    # 池尾是未核对的自身发言时当作触发点，否则会截断后面新到的外部消息
     own_trigger_idx: int | None = (
         len(pool) - 1 if (has_unseen_own and pool[-1].is_bot) else None
     )
 
-    if prev_read_id == 0:
-        unread = pool
-    elif ext_unread:
-        # 存在未读外部消息时，定位最后一条已读外部消息的位置，取其后的全部外部与穿插的自身发言（严格保持时间轴）
-        last_read_idx = -1
-        for idx, m in enumerate(pool):
-            if (not m.is_bot) and m.id <= prev_read_id:
-                last_read_idx = idx
-        unread = pool[last_read_idx + 1 :]
-    elif own_trigger_idx is not None:
-        unread = [pool[own_trigger_idx]]
-    else:
-        unread = []
-    unread_fits_one_screen = len(unread) <= eff_limit
-
     called_this_turn = called_sid_this_turn == target_sid
 
-    # ── ② 真的没有新东西 ──
+    # 默认模式：没有新消息
     if not ext_unread and own_trigger_idx is None and not called_this_turn:
         times = 1
         if repeat_counter is not None:
@@ -274,73 +246,60 @@ async def execute_read_channel(
             f"（id={newest_id}{mine_note}）。{way}"
         )
 
-    # ── ③ 五分支防刷屏精选（合并分支 1/2，按需延迟调用 select_mention_digest） ──
-    if prev_read_id == 0 or (not ext_unread and own_trigger_idx is None and called_this_turn):
-        display = pool[-eff_limit:]
-        mentioned_set = _mentioned_ids(display)
-    else:
-        # 仅当自身发言没有跨越未展示的外部未读消息时，才将其作为触发点，防止跳级吞掉中间未读
-        can_use_own_trigger = own_trigger_idx is not None and (
-            len(ext_unread) <= READ_CHANNEL_MENTION_CONTEXT
-        )
-        triggered = select_mention_digest(
-            pool,
-            prev_read_id,
-            eff_limit,
-            self_ids,
-            mention_keywords,
-            own_trigger_idx=own_trigger_idx if can_use_own_trigger else None,
-        )
-        if triggered.items:
-            display = triggered.items
-            mentioned_set = triggered.mentioned_ids
-        elif unread_fits_one_screen or "group" not in mtype.lower() or called_this_turn:
-            display = unread[-eff_limit:]
-            mentioned_set = set()
-            if called_this_turn:
-                last_ext = next((m for m in reversed(display) if not m.is_bot), None)
-                if last_ext is not None:
-                    mentioned_set.add(last_ext.id)
-        else:
-            display = []
-            mentioned_set = set()
-
+    # 默认模式：段目录，读一次即视为点开
     if repeat_counter is not None:
         repeat_counter[target_sid] = repeat_counter.get(target_sid, 0) + 1
 
-    if not display:
-        asked_cnt = store.count_unread(target_sid, prev_read_id)
-        return (
-            f"{target_sid} 没有叫你的新消息。另外有 {asked_cnt} 条没叫你的新消息，这次没列出来。"
-            f"想看，就传 before={newest_id + 1} 往前翻"
-            f"（每页 {READ_CHANNEL_PAGE_SIZE} 条，翻页不改已读）。"
-        )
+    is_group = "group" in mtype.lower()
+    latest_ext_id = max((m.id for m in pool if not m.is_bot), default=newest_id)
+    new_read_up_to = max(prev_read_id, latest_ext_id)
 
-    # ── ④ 已读水位线只推进到『这一屏里真正展示给她的最大外部消息 ID』（自身发言不推进水位线） ──
+    segments: list[dict[str, Any]] = []
+    segment_total = 0
+    if is_group:
+        segments = store.list_topic_segments(
+            target_sid, after_id=prev_read_id, limit=max(1, int(segment_page))
+        )
+        segment_total = store.count_topic_segments(target_sid, after_id=prev_read_id)
+
     store.clear_pending_bot_speeches(target_sid)
 
-    shown_up_to = max(
-        (m.id for m in display if not m.is_bot), default=prev_read_id
-    )
-    new_read_up_to = max(prev_read_id, shown_up_to)
-    not_shown = store.count_unread(target_sid, new_read_up_to)
+    if segments:
+        await store.update_read_state(
+            target_sid, read_up_to_id=new_read_up_to, pending_not_shown=0
+        )
+        where_label = store.resolve_session_name(
+            target_sid, group_name, "", "", cmap
+        )
+        older_cnt = segment_total - len(segments)
+        head = f"{target_sid} · {where_label}"
+        if older_cnt > 0:
+            head = f"{head}\n{len(segments)} 段，更早还有 {older_cnt} 段"
+        out = [head, ""]
+        for seg in segments:
+            out.append(
+                f"[段 {seg['id']}] "
+                f"{format_short_time(seg['start_ts'], tz_name)}-"
+                f"{format_short_time(seg['end_ts'], tz_name)} "
+                f"#{seg['start_msg_id']}-#{seg['end_msg_id']} {seg['summary']}"
+            )
+        out.append("")
+        out.append("传 segment=<编号> 展开某段的原文。")
+        return "\n".join(out)
+
+    # 默认模式：无段兜底，给最新原文
+    shown = pool[-eff_limit:]
+    mentioned_set = _mentioned_ids(shown)
     await store.update_read_state(
-        target_sid,
-        read_up_to_id=new_read_up_to,
-        pending_not_shown=not_shown,
+        target_sid, read_up_to_id=new_read_up_to, pending_not_shown=0
     )
 
-    display_floor = display[0].id
-    more_history_below = display_floor > fetch_floor or len(pool) >= pool_size
-
-    anchor = next((m for m in reversed(display) if not m.is_bot), display[-1])
+    anchor = next((m for m in reversed(shown) if not m.is_bot), shown[-1])
     where_label = store.resolve_session_name(
         target_sid, group_name, anchor.sender_id, anchor.sender_name, cmap
     )
-    mine_count = sum(1 for m in display if m.is_bot)
-    at_count = sum(
-        1 for m in display if (not m.is_bot) and m.id in mentioned_set
-    )
+    mine_count = sum(1 for m in shown if m.is_bot)
+    at_count = sum(1 for m in shown if (not m.is_bot) and m.id in mentioned_set)
     comp_parts = []
     if at_count > 0:
         comp_parts.append(f"{at_count} 条叫了你")
@@ -348,42 +307,35 @@ async def execute_read_channel(
         comp_parts.append(f"{mine_count} 条是你自己发的")
     comp_str = ("，" + "，".join(comp_parts)) if comp_parts else ""
 
-    pending_cursor = newest_id + 1
-    pending_line = (
-        f"还有 {not_shown} 条未读没列出来，传 before={pending_cursor} 往前翻能看到"
-        f"（每页 {READ_CHANNEL_PAGE_SIZE} 条，翻页不改已读）。"
-        if not_shown > 0 and (not_shown != prev_pending or called_this_turn)
-        else None
+    leftover = store.count_unread(target_sid, prev_read_id) - sum(
+        1 for m in shown if not m.is_bot and m.id > prev_read_id
     )
-
     captions = await captioner.caption_rows(
-        display, wait_sec=caption_wait_sec, max_new=caption_max_new
+        shown, wait_sec=caption_wait_sec, max_new=caption_max_new
     ) if captioner else {}
+
     out_lines = [
-        f"{target_sid} · {where_label}｜最近 {len(display)} 条{comp_str}（本机时间，从旧到新；已读到 id={new_read_up_to}）",
-        *_render_rows(display, mentioned_set, captions),
-        _paging_footer(
-            next_before=display_floor,
-            more=more_history_below,
-            page_size=READ_CHANNEL_PAGE_SIZE,
-        ),
+        f"{target_sid} · {where_label}｜最近 {len(shown)} 条{comp_str}",
+        *_render_rows(shown, mentioned_set, captions),
     ]
-    if pending_line:
-        out_lines.append(pending_line)
+    if leftover > 0:
+        out_lines.append("")
+        out_lines.append(f"更早 {leftover} 条没有总结，传 before={shown[0].id} 往前翻。")
     return "\n".join(out_lines)
 
 
 @pydantic_dataclass
 class ReadChannelTool(FunctionTool):
-    """AstrBot v4.5.7+ 标准 dataclass 形态的 read_channel 工具。"""
+    """read_channel 工具。"""
 
     name: str = "read_channel"
     description: str = (
-        "读某个 QQ 群或私聊的消息，也包括你自己在那边说过的话（行首写着（我））。"
-        f"未读不到一屏就全部给你；太多的话，只给叫了你的消息，和每条之前的 {READ_CHANNEL_MENTION_CONTEXT} 条。叫了你的那行前面有 ▶。读过的会标记已读。"
-        f"传 before 可以往前翻历史，每页 {READ_CHANNEL_PAGE_SIZE} 条，翻页不改已读。"
-        "想说话用 send_message_to_user。"
-        "图片后面会带一句描述。想细看或者问图里的具体内容，用 read_image，传 sid 和行首的 #编号。"
+        "读某个群或私聊的消息，也包括你自己在那边说过的话（行首写着（我））。"
+        "不带参数返回最近的段目录，一段是 25 条消息加一句总结。"
+        "传 segment=<编号> 展开某段原文，传 before=<消息编号> 往前翻历史。"
+        "读一次即清空该会话未读，翻页不改已读。"
+        "要说话用 send_message_to_user。"
+        "图片带一句描述，细节用 read_image，传 sid 和行首的 #编号。"
     )
     parameters: dict = Field(
         default_factory=lambda: {
@@ -393,18 +345,22 @@ class ReadChannelTool(FunctionTool):
                     "type": "string",
                     "description": "会话的 sid，长得像 aiocqhttp:GroupMessage:群号，从会话清单里抄。",
                 },
+                "segment": {
+                    "type": "integer",
+                    "description": "段编号。展开该段全部原文，不动未读。",
+                },
                 "before": {
                     "type": "integer",
                     "description": (
-                        "可选。翻页用的编号，从上一次结果末尾的提示里抄。"
-                        f"传了就读这个编号之前的历史，每页 {READ_CHANNEL_PAGE_SIZE} 条，不改已读。不传就读未读。"
+                        "消息编号。从这条往前翻，不改未读。和 segment 二选一。"
                     ),
                 },
                 "limit": {
                     "type": "integer",
                     "description": (
-                        f"这次最多给几条。默认 {READ_CHANNEL_DEFAULT_LIMIT} 条，翻页时默认 {READ_CHANNEL_PAGE_SIZE} 条，"
-                        f"最多 {READ_CHANNEL_MAX_LIMIT} 条。你自己说的话也算在里面。"
+                        f"原文条数上限，默认 {READ_CHANNEL_DEFAULT_LIMIT}，"
+                        f"翻页 {READ_CHANNEL_PAGE_SIZE}，最多 {READ_CHANNEL_MAX_LIMIT}。"
+                        "目录模式不受它影响。"
                     ),
                 },
             },

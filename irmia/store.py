@@ -1,4 +1,4 @@
-"""信箱状态存储与 AstrHe 数据库（messages 账本 / persons 关系本）联动层。"""
+"""信箱状态存储，只读联动 AstrHe 的账本与关系本。"""
 
 from __future__ import annotations
 
@@ -68,6 +68,20 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_fb_messages_umo_pmid
     WHERE platform_message_id IS NOT NULL AND platform_message_id != '';
 CREATE INDEX IF NOT EXISTS idx_fb_messages_umo_recalled_id
     ON fallback_messages(umo, recalled, id DESC);
+
+CREATE TABLE IF NOT EXISTS topic_segments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    umo TEXT NOT NULL,
+    start_msg_id INTEGER NOT NULL DEFAULT 0,
+    end_msg_id INTEGER NOT NULL DEFAULT 0,
+    start_ts REAL NOT NULL DEFAULT 0,
+    end_ts REAL NOT NULL DEFAULT 0,
+    summary TEXT NOT NULL DEFAULT '',
+    msg_count INTEGER NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_topic_segments_umo_end
+    ON topic_segments(umo, end_msg_id DESC);
 """
 
 ALIAS_CACHE_TTL_SEC = 60.0
@@ -91,6 +105,8 @@ class SessionSummary:
     topic: str
     group_name: str
     my_last_ts: float = 0.0
+    today_segments: int = 0
+    history_segments: int = 0
 
 
 @dataclass
@@ -137,7 +153,7 @@ def _row_to_message(r: sqlite3.Row) -> ChannelMessageRow:
 
 
 def parse_umo(umo: str) -> tuple[str, str, str]:
-    """解析三段式 UMO 字符串（platform_id:message_type:session_id）。
+    """拆三段式 UMO；格式不合法返回空串三元组。
 
     Args:
         umo: 统一消息来源字符串。
@@ -221,7 +237,7 @@ class IrmiaStore:
         return self._conn
 
     def _get_astrhe_conn(self) -> sqlite3.Connection | None:
-        """惰性获取并复用 AstrHe 数据库的只读连接（避免每次查询反复开关连接）。"""
+        """复用 AstrHe 的只读连接，按 mtime 失效。"""
         if not self.astrhe_db_path or not self.astrhe_db_path.is_file():
             if self._astrhe_conn is not None:
                 try:
@@ -249,7 +265,7 @@ class IrmiaStore:
             return None
 
     def _select_source_for_umo(self, umo: str) -> tuple[sqlite3.Connection, str]:
-        """为指定会话选择唯一消息表数据源（若 AstrHe 库含该会话记录则读 AstrHe，否则读本地 fallback_messages）。"""
+        """选消息表来源：AstrHe 有记录就读它，否则读 fallback_messages。"""
         aconn = self._get_astrhe_conn()
         if aconn is not None:
             try:
@@ -262,7 +278,7 @@ class IrmiaStore:
                 pass
         return self._ensure_conn(), "fallback_messages"
 
-    # ---------------- KV 状态 ----------------
+    # KV 状态
 
     async def get_kv(self, key: str, default: str = "") -> str:
         """读取持久化键值。"""
@@ -284,10 +300,10 @@ class IrmiaStore:
             )
             conn.commit()
 
-    # ---------------- 关系本与名称解析（联动 AstrHe + 内存 TTL 缓存） ----------------
+    # 关系本与名称解析
 
     def get_astrhe_person_alias(self, sender_id: str) -> str | None:
-        """从 AstrHe 的 persons 关系本表中读取该 QQ 号的第一个别名（带 60s 内存缓存，避免 N+1 查询）。"""
+        """取关系本里这个 QQ 的第一个别名，60 秒缓存。"""
         sid = str(sender_id or "").strip()
         if not sid:
             return None
@@ -324,7 +340,7 @@ class IrmiaStore:
         sender_card: str = "",
         contacts_map: dict[str, str] | None = None,
     ) -> str:
-        """按优先级解析发言人显示名：配置 contacts_map -> AstrHe 关系本别名 -> 群名片/昵称 -> 尾号代号。"""
+        """按 contacts_map、关系本、群名片、尾号的顺序取显示名。"""
         sid = str(sender_id or "").strip()
         cmap = contacts_map or {}
         if sid and sid in cmap:
@@ -361,7 +377,7 @@ class IrmiaStore:
             last_sender_id: 最近发言人 ID。
             last_sender_name: 最近发言人昵称。
             contacts_map: 插件配置中的备注字典。
-            with_last_sender: 群聊时是否拼接『群名 · 最近发言人』（复刻 self-brief.ts renderSessionList）。
+            with_last_sender: 群聊时是否拼成「群名 · 最近发言人」。
 
         Returns:
             可读的会话名称。
@@ -399,7 +415,7 @@ class IrmiaStore:
         )
         return gname if gname == person else f"{gname} · {person}"
 
-    # ---------------- 兜底消息记账 ----------------
+    # 兜底消息记账
 
     async def ensure_message_recorded(
         self,
@@ -417,7 +433,7 @@ class IrmiaStore:
         is_bot: bool = False,
         group_name: str = "",
     ) -> int:
-        """确保消息存在于账本中（若 AstrHe 已记录该会话则不重复写 fallback 表，否则记入 fallback_messages）。"""
+        """把消息记进账本；AstrHe 已记账的会话只同步群名。"""
         now_ts = ts if ts is not None else time.time()
         pid, mtype, sid = parse_umo(umo)
         eff_pid = platform_id or pid
@@ -452,43 +468,33 @@ class IrmiaStore:
                         bool(group_name) and self._group_names.get(umo) != group_name
                     )
                     if need_state_upsert:
+                        first_seen = umo not in self._known_umos
                         self._known_umos.add(umo)
                         if group_name:
                             self._group_names[umo] = group_name
+                        init_read_id = (
+                            self.get_latest_message_id(umo) if first_seen else 0
+                        )
                         async with self._lock:
                             conn = self._ensure_conn()
                             conn.execute(
                                 """
-                                INSERT INTO session_state(umo, group_name, updated_at) VALUES(?, ?, ?)
+                                INSERT INTO session_state(umo, read_up_to_id, group_name, updated_at) VALUES(?, ?, ?, ?)
                                 ON CONFLICT(umo) DO UPDATE SET
                                     group_name = CASE WHEN excluded.group_name != '' THEN excluded.group_name ELSE session_state.group_name END,
                                     updated_at = excluded.updated_at
                                 """,
-                                (umo, group_name, now_ts),
+                                (umo, init_read_id, group_name, now_ts),
                             )
                             conn.commit()
                     return 0
             except Exception:
                 pass
 
-        # 否则在同一事务内更新 session_state（首次建档或更新 group_name）并写入 fallback_messages
+        # 没有 AstrHe 记账时，消息写 fallback_messages，首见会话当场建档并把游标对齐到这条
         async with self._lock:
             conn = self._ensure_conn()
-            if umo not in self._known_umos or (
-                group_name and self._group_names.get(umo) != group_name
-            ):
-                self._known_umos.add(umo)
-                if group_name:
-                    self._group_names[umo] = group_name
-                conn.execute(
-                    """
-                    INSERT INTO session_state(umo, group_name, updated_at) VALUES(?, ?, ?)
-                    ON CONFLICT(umo) DO UPDATE SET
-                        group_name = CASE WHEN excluded.group_name != '' THEN excluded.group_name ELSE session_state.group_name END,
-                        updated_at = excluded.updated_at
-                    """,
-                    (umo, group_name, now_ts),
-                )
+            first_seen = umo not in self._known_umos
             cur = conn.execute(
                 """
                 INSERT OR IGNORE INTO fallback_messages(
@@ -511,10 +517,27 @@ class IrmiaStore:
                     "live",
                 ),
             )
+            if first_seen or (
+                group_name and self._group_names.get(umo) != group_name
+            ):
+                self._known_umos.add(umo)
+                if group_name:
+                    self._group_names[umo] = group_name
+                init_read_id = int(cur.lastrowid) if first_seen and cur.lastrowid else 0
+                conn.execute(
+                    """
+                    INSERT INTO session_state(umo, read_up_to_id, group_name, updated_at)
+                    VALUES(?, ?, ?, ?)
+                    ON CONFLICT(umo) DO UPDATE SET
+                        group_name = CASE WHEN excluded.group_name != '' THEN excluded.group_name ELSE session_state.group_name END,
+                        updated_at = excluded.updated_at
+                    """,
+                    (umo, init_read_id, group_name, now_ts),
+                )
             conn.commit()
             return int(cur.lastrowid) if cur.lastrowid else 0
 
-    # ---------------- 信箱状态与消息查询 ----------------
+    # 信箱状态与消息查询
 
     async def get_session_state(self, umo: str) -> dict[str, Any]:
         """获取指定会话的已读水位线与话题状态。"""
@@ -601,6 +624,93 @@ class IrmiaStore:
             )
             conn.commit()
 
+    async def append_topic_segment(
+        self,
+        umo: str,
+        *,
+        start_msg_id: int,
+        end_msg_id: int,
+        start_ts: float,
+        end_ts: float,
+        summary: str,
+        msg_count: int = 0,
+    ) -> None:
+        """写入一段话题概括；同 umo 同 end_msg_id 覆盖不新增。"""
+        text = str(summary or "").strip()
+        if not umo or int(end_msg_id) <= 0 or not text:
+            return
+        now_ts = time.time()
+        async with self._lock:
+            conn = self._ensure_conn()
+            row = conn.execute(
+                "SELECT id FROM topic_segments WHERE umo=? AND end_msg_id=? "
+                "ORDER BY id DESC LIMIT 1",
+                (umo, int(end_msg_id)),
+            ).fetchone()
+            if row is not None:
+                conn.execute(
+                    "UPDATE topic_segments SET start_msg_id=?, start_ts=?, end_ts=?, "
+                    "summary=?, msg_count=?, created_at=? WHERE id=?",
+                    (
+                        int(start_msg_id),
+                        float(start_ts),
+                        float(end_ts),
+                        text,
+                        int(msg_count),
+                        now_ts,
+                        int(row["id"]),
+                    ),
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO topic_segments(umo, start_msg_id, end_msg_id, "
+                    "start_ts, end_ts, summary, msg_count, created_at) "
+                    "VALUES(?,?,?,?,?,?,?,?)",
+                    (
+                        umo,
+                        int(start_msg_id),
+                        int(end_msg_id),
+                        float(start_ts),
+                        float(end_ts),
+                        text,
+                        int(msg_count),
+                        now_ts,
+                    ),
+                )
+            conn.commit()
+
+    def list_topic_segments(
+        self, umo: str, *, after_id: int = 0, limit: int = 10
+    ) -> list[dict[str, Any]]:
+        """取 end_msg_id > after_id 的段，最新的在前。"""
+        conn = self._ensure_conn()
+        rows = conn.execute(
+            "SELECT id, umo, start_msg_id, end_msg_id, start_ts, end_ts, summary, msg_count "
+            "FROM topic_segments WHERE umo=? AND end_msg_id>? "
+            "ORDER BY end_msg_id DESC LIMIT ?",
+            (umo, int(after_id), int(limit)),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def count_topic_segments(self, umo: str, *, after_id: int = 0) -> int:
+        """数 end_msg_id > after_id 的段数。"""
+        conn = self._ensure_conn()
+        row = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM topic_segments WHERE umo=? AND end_msg_id>?",
+            (umo, int(after_id)),
+        ).fetchone()
+        return int(row["cnt"] or 0) if row else 0
+
+    def get_topic_segment(self, segment_id: int) -> dict[str, Any] | None:
+        """按段编号取一段，不存在返回 None。"""
+        conn = self._ensure_conn()
+        row = conn.execute(
+            "SELECT id, umo, start_msg_id, end_msg_id, start_ts, end_ts, summary, msg_count "
+            "FROM topic_segments WHERE id=?",
+            (int(segment_id),),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
     async def mark_session_all_read(self, umo: str) -> None:
         """将某个会话（如私聊直接唤醒）标记为已读到当前最新一条消息。"""
         self._unseen_bot_umos.discard(umo)
@@ -620,13 +730,14 @@ class IrmiaStore:
         return int(row["m"]) if row and row["m"] is not None else 0
 
     def count_unread(self, umo: str, read_up_to_id: int) -> int:
-        """使用 SQL 精确统计某会话在 read_up_to_id 之后的非 Bot 未读消息条数（不受内存切片窗口截断）。"""
+        """数游标之后实时抓到的非 bot 消息，补账不算。"""
         _, mtype, _ = parse_umo(umo)
         if mtype and "group" not in mtype.lower():
             return 0
         db_conn, table = self._select_source_for_umo(umo)
         row = db_conn.execute(
-            f"SELECT COUNT(*) AS cnt FROM {table} WHERE umo=? AND recalled=0 AND is_bot=0 AND id>?",
+            f"SELECT COUNT(*) AS cnt FROM {table} "
+            "WHERE umo=? AND recalled=0 AND is_bot=0 AND source='live' AND id>?",
             (umo, int(read_up_to_id)),
         ).fetchone()
         return int(row["cnt"] or 0) if row else 0
@@ -638,8 +749,9 @@ class IrmiaStore:
         before_id: int | None = None,
         after_id: int | None = None,
         limit: int = 100,
+        asc: bool = False,
     ) -> list[ChannelMessageRow]:
-        """从账本（优先 AstrHe，否则内置兜底表）读取某会话的消息，按时间/ID 升序返回。"""
+        """读消息；默认取最近 limit 条，asc=True 时从 after_id 之后往后取。"""
         db_conn, table = self._select_source_for_umo(umo)
         clauses = ["umo=?", "recalled=0"]
         params: list[Any] = [umo]
@@ -650,13 +762,14 @@ class IrmiaStore:
             clauses.append("id>?")
             params.append(int(after_id))
         where_sql = " AND ".join(clauses)
+        order_sql = "ASC" if asc else "DESC"
         sql = (
             f"SELECT {MESSAGE_COLUMNS} "
-            f"FROM {table} WHERE {where_sql} ORDER BY id DESC LIMIT ?"
+            f"FROM {table} WHERE {where_sql} ORDER BY id {order_sql} LIMIT ?"
         )
         params.append(int(limit))
         rows = db_conn.execute(sql, tuple(params)).fetchall()
-        result = [_row_to_message(r) for r in reversed(rows)]
+        result = [_row_to_message(r) for r in (rows if asc else reversed(rows))]
         if table == "messages" and before_id is None and umo in self._pending_bot_speeches:
             wall_now = time.time()
             pid, mtype, sid = parse_umo(umo)
@@ -710,16 +823,16 @@ class IrmiaStore:
         return _row_to_message(row) if row is not None else None
 
     def has_unseen_bot_speech(self, umo: str) -> bool:
-        """判断该会话是否有尚未被 read_channel 核对展示过的 Bot 自身发言。"""
+        """这个会话有没有还没被展示过的自身发言。"""
         return umo in self._unseen_bot_umos
 
     def clear_pending_bot_speeches(self, umo: str) -> None:
-        """当 read_channel 已经展示过内存暂存的 Bot 发言后将其清理，避免重复触发。"""
+        """展示过就清掉暂存的自身发言。"""
         self._pending_bot_speeches.pop(umo, None)
         self._unseen_bot_umos.discard(umo)
 
-    async def list_sessions(self) -> list[SessionSummary]:
-        """聚合所有已知外部会话的摘要列表（复用单一连接 + GROUP BY 聚合查询，避免 2N+1 连接开销）。"""
+    async def list_sessions(self, day_start_ts: float | None = None) -> list[SessionSummary]:
+        """聚合会话摘要；给 day_start_ts 时顺带算今天与历史段数。"""
         async with self._lock:
             conn = self._ensure_conn()
             state_rows = conn.execute("SELECT * FROM session_state").fetchall()
@@ -774,12 +887,26 @@ class IrmiaStore:
 
                 if "group" in eff_mtype.lower():
                     u_row = dbc.execute(
-                        f"SELECT COUNT(*) AS unread FROM {table} WHERE umo=? AND recalled=0 AND is_bot=0 AND id>?",
+                        f"SELECT COUNT(*) AS unread FROM {table} "
+                        "WHERE umo=? AND recalled=0 AND is_bot=0 AND source='live' AND id>?",
                         (umo, read_up_to_id),
                     ).fetchone()
                     unread = int(u_row["unread"] or 0) if u_row else 0
                 else:
                     unread = 0
+
+                today_segments = 0
+                history_segments = 0
+                if "group" in eff_mtype.lower() and day_start_ts is not None:
+                    seg_row = conn.execute(
+                        "SELECT "
+                        "SUM(CASE WHEN end_ts>=? AND end_msg_id>? THEN 1 ELSE 0 END) AS today_cnt, "
+                        "SUM(CASE WHEN end_msg_id<=? THEN 1 ELSE 0 END) AS hist_cnt "
+                        "FROM topic_segments WHERE umo=?",
+                        (day_start_ts, read_up_to_id, read_up_to_id, umo),
+                    ).fetchone()
+                    today_segments = int(seg_row["today_cnt"] or 0) if seg_row else 0
+                    history_segments = int(seg_row["hist_cnt"] or 0) if seg_row else 0
 
                 out.append(
                     SessionSummary(
@@ -801,6 +928,8 @@ class IrmiaStore:
                         topic=topic,
                         group_name=group_name,
                         my_last_ts=float(r["my_last_ts"] or 0.0),
+                        today_segments=today_segments,
+                        history_segments=history_segments,
                     )
                 )
             return out

@@ -1,4 +1,4 @@
-"""识图存储：收图留底与描述缓存只使用 Mia 自己的数据目录。
+"""识图存储：留底图与描述缓存，只用插件自己的数据目录。
 
 AstrBot 在事件结束时删除预处理的临时图片，必须在入站钩子里另存缩小图，
 之后按会话与平台消息编号读取；图片描述仅缓存，不回写聊天账本。
@@ -109,7 +109,7 @@ def make_kept_jpeg(src_path: str, keep_root: Path) -> tuple[str, str, str]:
             except PermissionError:
                 # Windows 上目标正被另一线程读取时不允许覆盖；同 sha 内容相同，别人写好即可
                 tmp.unlink()
-    # 缓存新图和重复图都以最终 JPEG 算 dHash，避免压缩导致哈希不同。
+    # 新图和重复图都按最终 JPEG 算 dHash。压缩后的哈希会不同。
     with Image.open(target) as image:
         return sha, compute_dhash(image), str(target)
 
@@ -142,7 +142,7 @@ class VisionStore:
                 self._conn = None
 
     def keep_image(self, umo: str, pmid: str, idx: int, src_path: str) -> None:
-        """保存并登记一张留底图；缩放编码在锁外做，避免长时间占住数据库锁。"""
+        """保存并登记留底图；缩放编码在锁外做。"""
         sha, dhash, path = make_kept_jpeg(src_path, self.keep_root)
         self.add_kept(umo, pmid, idx, sha, dhash, path)
 

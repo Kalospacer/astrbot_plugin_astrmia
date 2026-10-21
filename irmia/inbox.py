@@ -1,4 +1,4 @@
-"""通道消息分流器与群聊防大喘气攒批门（复刻 I.R.M.I.A src/channel/inbox.ts & src/runtime/group-batch.ts）。"""
+"""通道消息分流与群点名攒批。"""
 
 from __future__ import annotations
 
@@ -44,7 +44,7 @@ def evaluate_channel_message(
     text: str,
     mention_keywords: Sequence[str],
 ) -> WakeCheckResult:
-    """判断一条通道消息该唤醒主脑还是静默归入信箱（纯函数，复刻 shouldWakeForChannelMessage）。
+    """判断一条通道消息该唤醒主脑还是进信箱。
 
     规则：
     1. 私聊（is_private=True）-> 无条件唤醒（对方就是在直接跟她说话）。

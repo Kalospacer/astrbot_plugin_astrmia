@@ -73,7 +73,6 @@ def test_read_channel_five_branches_and_paging(tmp_path: Path) -> None:
             bot_self_ids={"999999"},
         )
         assert "最近 3 条" in first_out
-        assert "已读到 id=3" in first_out
         st = await store.get_session_state(umo)
         assert st["read_up_to_id"] == 3
 
@@ -116,14 +115,13 @@ def test_read_channel_five_branches_and_paging(tmp_path: Path) -> None:
             bot_self_ids={"999999"},
         )
         assert "▶ [" in digest_out and "弥亚快来评评理！" in digest_out
-        # 已读水位线只按实际展示的最大非 bot 消息 #18 推进，#19..#28 中的 9 条非 bot 消息保持未读
-        assert "已读到 id=18" in digest_out
-        assert "还有 9 条未读没列出来，传 before=29 往前翻能看到" in digest_out
-        assert "before=8" in digest_out
+        # 没分过段：给最新一屏原文，游标一口气推到最新外部消息 #28
+        assert "最近 20 条" in digest_out
+        assert "更早 5 条没有总结，传 before=9 往前翻" in digest_out
         st_after = await store.get_session_state(umo)
-        assert st_after["read_up_to_id"] == 18
+        assert st_after["read_up_to_id"] == 28
 
-        # 测试按提示带上 before=29 翻页：能看到 #20 的（我）和 #21..#28 的未读消息，且翻页不修改 read_up_to_id（仍保持 18）
+        # 按提示带 before=29 翻页：能看到 #20 的（我）和 #21..#28，翻页不修改游标
         page_out = await execute_read_channel(
             store=store,
             sid=umo,
@@ -134,7 +132,7 @@ def test_read_channel_five_branches_and_paging(tmp_path: Path) -> None:
         assert "（我）: 我刚睡醒呢" in page_out
         assert "翻页不改已读" in page_out
         st_paged = await store.get_session_state(umo)
-        assert st_paged["read_up_to_id"] == 18
+        assert st_paged["read_up_to_id"] == 28
 
         # 验证跨轮次场景：先把剩余未读读完推进到 28，随后 Bot 回复 #29，接着群友又发了 #30, #31
         await store.mark_session_all_read(umo)
@@ -208,7 +206,7 @@ def test_render_mention_notice_and_session_list(tmp_path: Path) -> None:
         sessions = await store.list_sessions()
         rendered = render_session_list(sessions, lambda s: s.group_name)
         assert "摸鱼群｜sid aiocqhttp:GroupMessage:888888" in rendered
-        assert "｜1 条未读｜在聊：大家在打招呼" in rendered
+        assert "｜今天 0 段 / 历史 0 段｜在聊：大家在打招呼" in rendered
         assert "我还没在这说过话" in rendered
         await store.close()
 

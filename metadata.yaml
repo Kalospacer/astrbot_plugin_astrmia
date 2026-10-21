@@ -1,6 +1,6 @@
 name: astrbot_plugin_astrmia
 display_name: AstrMia
-desc: 让她只有一个脑子：所有私聊和群聊共用一段记忆，群消息先进信箱、被叫到才醒，没人说话时也会自己醒来看看。可配合 AstrHe 使用。
+desc: AstrMia 插件
 version: v0.1.0
 author: Kalo & Qingyi
 repo: https://github.com/Kalospacer/astrbot_plugin_astrmia
