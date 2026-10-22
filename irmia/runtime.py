@@ -12,6 +12,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from astrbot.api.event import MessageChain
+
 from .config import IrmiaConfig, is_in_quiet_window, load_irmia_config
 from .heartbeat import HeartbeatEngine, HeartbeatFiring
 from .inbox import GroupBatcher, evaluate_channel_message
@@ -543,33 +545,41 @@ class IrmiaRuntime:
             group_name=group_name,
         )
 
-        if cfg.image_keep_days > 0 and msg_id:
-            await keep_event_images(event, umo, msg_id, self.vision_store, self.logger)
-
-        # 若命中了已注册的插件指令（handlers_parsed_params 非空），直接放行给命令处理器
         raw_str = str(getattr(event, "message_str", "") or "").strip()
-        if event.get_extra("handlers_parsed_params"):
-            return
-
+        is_command = bool(event.get_extra("handlers_parsed_params"))
         decision = evaluate_channel_message(
             is_private=is_private,
             is_platform_at=is_platform_at,
             text=raw_str or text,
             mention_keywords=cfg.mention_keywords,
         )
+        batch_task: asyncio.Task[bool] | None = None
+        batch_enabled = (
+            cfg.private_batch_enabled
+            if decision.is_private
+            else cfg.group_batch_enabled and decision.should_wake
+        )
+        if not is_command and batch_enabled and cfg.group_batch_window_sec > 0:
+            item = (
+                {"text": raw_str or text, "images": _collect_event_image_urls(event)}
+                if decision.is_private
+                else None
+            )
+            batch_task = self._spawn_bg(
+                self.batcher.wait_my_turn(umo, cfg.group_batch_window_sec, item=item)
+            )
+
+        if cfg.image_keep_days > 0 and msg_id:
+            await keep_event_images(event, umo, msg_id, self.vision_store, self.logger)
+        if is_command:
+            return
 
         if decision.is_private:
             self.heartbeat.note_activity()
             await self.maybe_bind_master_umo(event)
 
-            if cfg.private_batch_enabled and cfg.group_batch_window_sec > 0:
-                item = {
-                    "text": raw_str or text,
-                    "images": _collect_event_image_urls(event),
-                }
-                is_leader = await self.batcher.wait_my_turn(
-                    umo, cfg.group_batch_window_sec, item=item
-                )
+            if batch_task is not None:
+                is_leader = await batch_task
                 if not is_leader:
                     event.stop_event()
                     return
@@ -602,10 +612,8 @@ class IrmiaRuntime:
 
         # 群聊已点名 -> 归零心跳计时，执行防大喘气攒批等待
         self.heartbeat.note_activity()
-        if cfg.group_batch_enabled and cfg.group_batch_window_sec > 0:
-            is_leader = await self.batcher.wait_my_turn(
-                umo, cfg.group_batch_window_sec
-            )
+        if batch_task is not None:
+            is_leader = await batch_task
             if not is_leader:
                 event.stop_event()
                 return
@@ -661,7 +669,9 @@ class IrmiaRuntime:
         task = asyncio.current_task()
         if task is not None:
             task.add_done_callback(
-                lambda _t, ev=event: self._flush_unconsumed_buffered_chain(ev)
+                lambda _t, ev=event: self._spawn_bg(
+                    self._flush_unconsumed_buffered_chain(ev)
+                )
             )
         if not await self.resolve_master_umo():
             return
@@ -897,9 +907,17 @@ class IrmiaRuntime:
         async def patched_send_message(session, message_chain):
             if self.cfg().enabled and self.cfg().intercept_direct_reply:
                 ev = self._current_chat_event.get()
-                if ev is not None and not is_internal_silent_event(ev):
+                if (
+                    ev is not None
+                    and not is_internal_silent_event(ev)
+                    and not ev.get_extra("irmia_wake")
+                ):
                     ev_umo = str(getattr(ev, "unified_msg_origin", "") or "").strip()
-                    if ev_umo and str(session) == ev_umo and not ev.get_extra("irmia_in_decorating"):
+                    if (
+                        ev_umo
+                        and str(session) == ev_umo
+                        and not ev.get_extra("irmia_in_decorating")
+                    ):
                         chain = getattr(message_chain, "chain", None)
                         if chain:
                             buffered = ev.get_extra("irmia_buffered_tool_chain", [])
@@ -919,21 +937,29 @@ class IrmiaRuntime:
                 self.context.send_message = self._original_send_message
             setattr(self.context, "_irmia_send_patched", False)
 
-    def _flush_unconsumed_buffered_chain(self, event: Any) -> None:
-        """本轮没进 on_decorating_result 时，把暂存链补发出去。"""
+    async def _flush_unconsumed_buffered_chain(self, event: Any) -> None:
+        """补发未进入最终装饰步骤的暂存回复，发送成功后再清空缓存。"""
         if not hasattr(event, "get_extra"):
             return
         buffered = event.get_extra("irmia_buffered_tool_chain")
         if not isinstance(buffered, list) or not buffered:
             return
-        event.set_extra("irmia_buffered_tool_chain", [])
-        event.set_extra("irmia_in_decorating", True)
         umo = str(getattr(event, "unified_msg_origin", "") or "").strip()
         if not umo or self.context is None or not hasattr(self.context, "send_message"):
             return
-        mc = MessageChain() if MessageChain is not None else SimpleNamespace(chain=[])
-        mc.chain = list(buffered)
-        self._spawn_bg(self.context.send_message(umo, mc))
+
+        event.set_extra("irmia_in_decorating", True)
+        message_chain = MessageChain(chain=list(buffered))
+        try:
+            sent = await self.context.send_message(umo, message_chain)
+        except Exception as exc:
+            self.logger.debug(f"[IRMIA] 暂存回复补发异常: {exc!r}")
+            sent = False
+
+        if sent:
+            event.set_extra("irmia_buffered_tool_chain", [])
+        else:
+            self.logger.info(f"[IRMIA] 暂存回复补发失败，保留 {len(buffered)} 个组件")
 
     async def on_llm_response(self, event: Any, resp: Any = None) -> None:
         """标记已进入最终回复步。"""
@@ -1009,8 +1035,11 @@ class IrmiaRuntime:
             return
 
     async def on_after_message_sent(self, event: Any) -> None:
-        """直出回复落地后补记进兜底账本。"""
-        if is_internal_silent_event(event) or not self.cfg().enabled:
+        """直出回复落地后补记进兜底账本，已由工具回执记账的回流回复不重复写入。"""
+        cfg = self.cfg()
+        if is_internal_silent_event(event) or not cfg.enabled:
+            return
+        if cfg.intercept_direct_reply and event.get_extra("irmia_sent_current_session"):
             return
         result = getattr(event, "get_result", lambda: None)()
         if result is None or not getattr(result, "chain", None):

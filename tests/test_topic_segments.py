@@ -8,6 +8,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 from irmia.config import load_irmia_config
 from irmia.read_channel_tool import execute_read_channel
 from irmia.store import IrmiaStore
@@ -354,5 +356,118 @@ def test_mention_digest_skips_segment_directory(tmp_path: Path) -> None:
         assert "[段 " not in out
         assert "清漪在吗" in out
         await store.close()
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize(("tail_count", "limit"), [(1, 20), (5, 20), (8, 3), (130, 3)])
+def test_segment_directory_includes_tail(
+    tmp_path: Path, tail_count: int, limit: int
+) -> None:
+    """目录包含未成段尾巴；超出展示容量时明确给翻页入口。"""
+
+    async def _run() -> None:
+        store = IrmiaStore(tmp_path)
+        await store.open()
+        try:
+            await _feed(store, 1, 25 + tail_count)
+            await store.append_topic_segment(
+                UMO,
+                start_msg_id=1,
+                end_msg_id=25,
+                start_ts=1700000001,
+                end_ts=1700000025,
+                summary="已经概括的段",
+            )
+            out = await execute_read_channel(store=store, sid=UMO, limit=limit)
+
+            assert "[段 1]" in out
+            assert "未成段" in out
+            assert f"第 {25 + tail_count} 条" in out
+            if tail_count > limit:
+                assert f"before={26 + tail_count - limit}" in out
+            assert (await store.get_session_state(UMO))[
+                "read_up_to_id"
+            ] == 25 + tail_count
+            assert "没有新消息" in await execute_read_channel(store=store, sid=UMO)
+        finally:
+            await store.close()
+
+    asyncio.run(_run())
+
+
+def test_directory_render_failure_does_not_mark_read(tmp_path: Path) -> None:
+    """尾巴渲染失败时不推进已读游标，也不清理尚未展示的自身发言。"""
+
+    async def _run() -> None:
+        store = IrmiaStore(tmp_path)
+        await store.open()
+        try:
+            await _feed(store, 1, 26)
+            await store.append_topic_segment(
+                UMO,
+                start_msg_id=1,
+                end_msg_id=25,
+                start_ts=1,
+                end_ts=25,
+                summary="已有段",
+            )
+            before = (await store.get_session_state(UMO))["read_up_to_id"]
+
+            async def _failed_caption(*args, **kwargs):
+                raise RuntimeError("caption failed")
+
+            captioner = SimpleNamespace(caption_rows=_failed_caption)
+            with pytest.raises(RuntimeError, match="caption failed"):
+                await execute_read_channel(store=store, sid=UMO, captioner=captioner)
+            assert (await store.get_session_state(UMO))["read_up_to_id"] == before
+        finally:
+            await store.close()
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("recalled", [False, True])
+def test_expand_segment_stops_at_end_with_interleaved_ids(
+    tmp_path: Path, recalled: bool
+) -> None:
+    """其他群占据中间编号或段内消息撤回，都不能把后续消息补进本段。"""
+
+    async def _run() -> None:
+        store = IrmiaStore(tmp_path)
+        await store.open()
+        try:
+            start = await store.ensure_message_recorded(umo=UMO, text="段首消息")
+            for i in range(8):
+                await store.ensure_message_recorded(
+                    umo="aiocqhttp:GroupMessage:888", text=f"其他群 {i}"
+                )
+            end = await store.ensure_message_recorded(umo=UMO, text="段尾消息")
+            for i in range(8):
+                await store.ensure_message_recorded(umo=UMO, text=f"段外消息 {i}")
+            await store.append_topic_segment(
+                UMO,
+                start_msg_id=start,
+                end_msg_id=end,
+                start_ts=1,
+                end_ts=2,
+                summary="只有两条",
+            )
+            if recalled:
+                conn = store._ensure_conn()
+                conn.execute(
+                    "UPDATE fallback_messages SET recalled=1 WHERE id=?", (start,)
+                )
+                conn.commit()
+            cursor = (await store.get_session_state(UMO))["read_up_to_id"]
+            out = await execute_read_channel(store=store, sid=UMO, segment=1)
+
+            assert "段尾消息" in out
+            assert "段外消息" not in out
+            assert "其他群" not in out
+            assert f"段 1，{1 if recalled else 2} 条" in out
+            assert (await store.get_session_state(UMO))["read_up_to_id"] == cursor
+        finally:
+            await store.close()
 
     asyncio.run(_run())

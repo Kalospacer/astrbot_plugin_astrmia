@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 from irmia.runtime import IrmiaRuntime
 
@@ -464,5 +465,258 @@ def test_runtime_batch_debounce_switches(tmp_path: Path) -> None:
         assert grp_ev3.stopped is False
 
         await rt.terminate()
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("intercept", [False, True])
+@pytest.mark.parametrize(
+    "target", ["aiocqhttp:FriendMessage:114514", "aiocqhttp:GroupMessage:777"]
+)
+def test_wake_tool_message_sends_immediately(
+    tmp_path: Path, intercept: bool, target: str
+) -> None:
+    """心跳工具消息直接送达，不等待普通聊天的最终回复步骤。"""
+    from types import SimpleNamespace
+    from astrbot.core.platform.message_session import MessageSession
+    from astrbot.core.tools.message_tools import SendMessageToUserTool
+    from irmia.runtime import HeartbeatWakeEvent
+
+    async def _run() -> None:
+        master = "aiocqhttp:FriendMessage:114514"
+        ctx = FakeContext()
+        rt = IrmiaRuntime(
+            ctx,
+            {
+                "master_umo": master,
+                "heartbeat_enabled": False,
+                "intercept_direct_reply": intercept,
+            },
+            logging.getLogger("test"),
+            data_dir=tmp_path,
+        )
+        await rt.initialize()
+        try:
+            session = MessageSession.from_str(master)
+            event = HeartbeatWakeEvent(
+                context=ctx,
+                session=session,
+                message="heartbeat",
+                extras={"irmia_wake": True},
+                message_type=session.message_type,
+            )
+            await rt.on_llm_request(event, FakeReq(prompt="heartbeat"))
+            wrapper = SimpleNamespace(context=SimpleNamespace(event=event, context=ctx))
+            result = await SendMessageToUserTool().call(
+                wrapper,
+                messages=[{"type": "plain", "text": "主动问候"}],
+                session=target,
+            )
+
+            assert result == f"Message sent to session {target}"
+            assert len(ctx.sent_messages) == 1
+            assert ctx.sent_messages[0][0] == target
+            assert ctx.sent_messages[0][1].get_plain_text() == "主动问候"
+            assert not event.get_extra("irmia_buffered_tool_chain")
+        finally:
+            await rt.terminate()
+
+    asyncio.run(_run())
+
+
+def test_buffered_reply_flushes_when_turn_finishes(tmp_path: Path) -> None:
+    """聊天未进入最终装饰步骤时，由任务结束回调补发一次。"""
+    from astrbot.core.message.components import Plain
+    from astrbot.core.message.message_event_result import MessageChain
+
+    async def _run() -> None:
+        umo = "aiocqhttp:FriendMessage:114514"
+        ctx = FakeContext()
+        rt = IrmiaRuntime(
+            ctx,
+            {
+                "master_umo": umo,
+                "heartbeat_enabled": False,
+                "intercept_direct_reply": True,
+            },
+            logging.getLogger("test"),
+            data_dir=tmp_path,
+        )
+        await rt.initialize()
+        event = FakeEvent(umo, "问题", private=True)
+        try:
+
+            async def _turn() -> None:
+                await rt.on_waiting_llm_request(event)
+                await rt.on_llm_request(event, FakeReq(prompt="问题"))
+                assert await ctx.send_message(
+                    umo, MessageChain(chain=[Plain("需要补发的回复")])
+                )
+                assert ctx.sent_messages == []
+
+            await asyncio.create_task(_turn())
+            await asyncio.sleep(0)
+            await asyncio.gather(*list(rt._bg_tasks))
+
+            assert len(ctx.sent_messages) == 1
+            assert ctx.sent_messages[0][1].get_plain_text() == "需要补发的回复"
+            assert not event.get_extra("irmia_buffered_tool_chain")
+            assert not rt._brain_lock.locked()
+        finally:
+            await rt.terminate()
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("failure", [False, RuntimeError("transport failed")])
+def test_buffered_reply_flush_failure_preserves_buffer(
+    tmp_path: Path, failure: Any
+) -> None:
+    """发送未成功时保留暂存消息，不能先清空再丢失。"""
+    from unittest.mock import AsyncMock
+    from astrbot.core.message.components import Plain
+
+    async def _run() -> None:
+        umo = "aiocqhttp:FriendMessage:114514"
+        ctx = FakeContext()
+        transport = (
+            AsyncMock(side_effect=failure)
+            if isinstance(failure, Exception)
+            else AsyncMock(return_value=False)
+        )
+        ctx.send_message = transport
+        rt = IrmiaRuntime(
+            ctx,
+            {"heartbeat_enabled": False, "intercept_direct_reply": True},
+            logging.getLogger("test"),
+            data_dir=tmp_path,
+        )
+        await rt.initialize()
+        event = FakeEvent(umo, "问题", private=True)
+        chain = [Plain("不能丢的回复")]
+        event.set_extra("irmia_buffered_tool_chain", chain)
+        try:
+            await rt._flush_unconsumed_buffered_chain(event)
+            assert event.get_extra("irmia_buffered_tool_chain") == chain
+            transport.assert_awaited_once()
+        finally:
+            await rt.terminate()
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("intercept", [False, True])
+@pytest.mark.parametrize(
+    "target", ["aiocqhttp:FriendMessage:114514", "aiocqhttp:GroupMessage:777"]
+)
+def test_tool_reply_is_recorded_once(
+    tmp_path: Path, intercept: bool, target: str
+) -> None:
+    """工具回执与最终发送完整串联后，一条回复只记账一次。"""
+    from types import SimpleNamespace
+    from astrbot.core.message.message_event_result import (
+        MessageEventResult,
+        ResultContentType,
+    )
+    from astrbot.core.tools.message_tools import SendMessageToUserTool
+
+    async def _run() -> None:
+        umo = "aiocqhttp:FriendMessage:114514"
+        ctx = FakeContext()
+        rt = IrmiaRuntime(
+            ctx,
+            {
+                "master_umo": umo,
+                "heartbeat_enabled": False,
+                "intercept_direct_reply": intercept,
+            },
+            logging.getLogger("test"),
+            data_dir=tmp_path,
+        )
+        await rt.initialize()
+        event = FakeEvent(umo, "问题", private=True, role="admin")
+        try:
+            await rt.on_llm_request(event, FakeReq(prompt="问题"))
+            wrapper = SimpleNamespace(context=SimpleNamespace(event=event, context=ctx))
+            tool = SendMessageToUserTool()
+            args = {
+                "messages": [{"type": "plain", "text": "唯一的工具回复"}],
+                "session": target,
+            }
+            result = await tool.call(wrapper, **args)
+            await rt.on_llm_tool_respond(event, tool, args, result)
+            await rt.on_llm_response(event)
+            event._result = (
+                MessageEventResult()
+                .message("普通最终回复")
+                .set_result_content_type(ResultContentType.LLM_RESULT)
+            )
+            await rt.on_decorating_result(event)
+            if event._result.chain:
+                await ctx.send_message(umo, event._result)
+                await rt.on_after_message_sent(event)
+
+            rows = rt.store.fetch_messages(target)
+            assert sum(row.is_bot and row.text == "唯一的工具回复" for row in rows) == 1
+            if not (intercept and target == umo):
+                direct = rt.store.fetch_messages(umo)
+                assert (
+                    sum(row.is_bot and row.text == "普通最终回复" for row in direct)
+                    == 1
+                )
+        finally:
+            await rt.terminate()
+
+    asyncio.run(_run())
+
+
+def test_batch_order_survives_slow_image_keep(tmp_path: Path, monkeypatch) -> None:
+    """先到消息的图片留底较慢，也不能抢走后到消息的攒批代表位置。"""
+
+    async def _run() -> None:
+        umo = "aiocqhttp:FriendMessage:114514"
+        ctx = FakeContext()
+        rt = IrmiaRuntime(
+            ctx,
+            {
+                "master_umo": umo,
+                "heartbeat_enabled": False,
+                "group_batch_window_sec": 0.02,
+            },
+            logging.getLogger("test"),
+            data_dir=tmp_path,
+        )
+        await rt.initialize()
+        first = FakeEvent(umo, "先到的消息", private=True)
+        second = FakeEvent(umo, "后到的消息", private=True)
+        first.message_obj.message_id = "first"
+        second.message_obj.message_id = "second"
+        keep_started = asyncio.Event()
+        release_keep = asyncio.Event()
+
+        async def _delayed_keep(event, *args):
+            if event is first:
+                keep_started.set()
+                await release_keep.wait()
+            return 0
+
+        monkeypatch.setattr("irmia.runtime.keep_event_images", _delayed_keep)
+        first_task = asyncio.create_task(rt.on_incoming_event(first))
+        try:
+            await keep_started.wait()
+            await rt.on_incoming_event(second)
+            release_keep.set()
+            await first_task
+
+            assert first.stopped is True
+            assert second.stopped is False
+            assert second.get_extra("irmia_batched_private_texts") == [
+                "先到的消息",
+                "后到的消息",
+            ]
+        finally:
+            release_keep.set()
+            await first_task
+            await rt.terminate()
 
     asyncio.run(_run())

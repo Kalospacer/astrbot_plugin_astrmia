@@ -193,13 +193,13 @@ class VisionStore:
         dhash: str = "",
         allow_brief: bool = True,
     ) -> str | None:
-        """精确查描述，图被重新压缩时按 dHash 近似命中；命中时更新最后使用时间。
+        """完整描述与问答只按原图精确命中，旧简述可近似命中；命中时更新最后使用时间。
 
         Args:
             sha256: 留底图的哈希。
             kind: 描述种类，`caption` 是完整描述，`qa` 是带问题的回答。
             question: 提问原文，只有 qa 才有。
-            dhash: 留底图指纹，用于换压缩参数后的近似命中。
+            dhash: 留底图指纹，仅用于旧 brief 简述的近似命中。
             allow_brief: 缺完整描述时要不要拿旧的一句话简述凑数。展示侧要，
                 因为一句也比没有强；read_image 不要，它要的是完整描述。
 
@@ -218,10 +218,9 @@ class VisionStore:
                 ).fetchone()
                 if row is not None:
                     break
-            if row is None and kind in ("caption", "brief") and dhash:
-                fallback_kinds = "('caption','brief')" if allow_brief else f"('{kind}')"
+            if row is None and kind == "brief" and dhash:
                 recent = self._conn.execute(
-                    f"SELECT * FROM image_desc WHERE kind IN {fallback_kinds} AND dhash!='' ORDER BY last_hit_at DESC LIMIT ?",
+                    "SELECT * FROM image_desc WHERE kind='brief' AND dhash!='' ORDER BY last_hit_at DESC LIMIT ?",
                     (DHASH_SCAN_LIMIT,),
                 ).fetchall()
                 row = next(

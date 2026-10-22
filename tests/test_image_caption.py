@@ -6,6 +6,8 @@ import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from irmia.read_channel_tool import execute_read_channel
 from irmia.store import IrmiaStore
 from irmia.vision import VisionStore
@@ -90,13 +92,14 @@ def test_render_truncates_both_bare_and_described() -> None:
 
 
 def test_vision_store_hits_old_brief_cache(tmp_path: Path) -> None:
-    """换了压缩参数后 dHash 仍能命中旧缓存，改档名不废老数据。"""
+    """同一原图可复用旧简述，另一张图不能近似命中全文缓存。"""
     vstore = VisionStore(tmp_path / "vision.db", tmp_path / "kept")
     vstore.open()
     vstore.put_desc("sha-new", "brief", "", "abcdef0123456789", "model", "旧的一句话")
-    hit = vstore.find_desc("sha-other", KIND_FULL, "", "abcdef0123456789")
+    hit = vstore.find_desc("sha-new", KIND_FULL, "", "abcdef0123456789")
     assert hit == "旧的一句话"
-    strict = vstore.find_desc("sha-other", KIND_FULL, "", "abcdef0123456789", False)
+    assert vstore.find_desc("sha-other", KIND_FULL, "", "abcdef0123456789") is None
+    strict = vstore.find_desc("sha-new", KIND_FULL, "", "abcdef0123456789", False)
     assert strict is None
     vstore.close()
 
@@ -197,5 +200,164 @@ def test_topic_keeps_full_caption_for_summary(tmp_path: Path) -> None:
         assert has_text and topic == "在聊截图"
         assert LONG_CAPTION[:200] in captured[0]
         await store.close()
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("allow_brief", [False, True])
+def test_full_caption_cache_rejects_similar_images(
+    tmp_path: Path, allow_brief: bool
+) -> None:
+    """完整描述只能精确命中原图，不能拿相似截图中的旧金额代替。"""
+    vstore = VisionStore(tmp_path / "vision.db", tmp_path / "kept")
+    vstore.open()
+    try:
+        vstore.put_desc(
+            "original", KIND_FULL, "", "0000000000000909", "model", "金额 100.00"
+        )
+        assert (
+            vstore.find_desc("other", KIND_FULL, "", "000000000000050d", allow_brief)
+            is None
+        )
+        assert (
+            vstore.find_desc("original", KIND_FULL, "", "0000000000000909", allow_brief)
+            == "金额 100.00"
+        )
+    finally:
+        vstore.close()
+
+
+@pytest.mark.parametrize("first_result", ["error", "empty", "success", "all_failed"])
+def test_caption_provider_chain_falls_back(tmp_path: Path, first_result: str) -> None:
+    """模型存在但调用失败或返回空白时，继续尝试去重后的下一候选。"""
+    from unittest.mock import AsyncMock
+    from irmia.config import IrmiaConfig
+    from irmia.vision import KeptImage
+    from irmia.vision_describe import Captioner
+
+    async def _run() -> None:
+        first = (
+            AsyncMock(side_effect=RuntimeError("unavailable"))
+            if first_result in ("error", "all_failed")
+            else AsyncMock(
+                return_value=SimpleNamespace(
+                    completion_text="首选结果" if first_result == "success" else ""
+                )
+            )
+        )
+        second = (
+            AsyncMock(side_effect=RuntimeError("also unavailable"))
+            if first_result == "all_failed"
+            else AsyncMock(return_value=SimpleNamespace(completion_text="后备结果"))
+        )
+        providers = {
+            "first": SimpleNamespace(
+                text_chat=first, meta=lambda: SimpleNamespace(id="first")
+            ),
+            "second": SimpleNamespace(
+                text_chat=second, meta=lambda: SimpleNamespace(id="second")
+            ),
+        }
+        context = SimpleNamespace(
+            get_config=lambda umo=None: {
+                "provider_settings": {"default_image_caption_provider_id": "first"}
+            },
+            get_provider_by_id=providers.get,
+            get_using_provider_async=AsyncMock(return_value=providers["second"]),
+        )
+        cfg = IrmiaConfig(vision_provider_ids=["first", "second", "second"])
+        vstore = VisionStore(tmp_path / "vision.db", tmp_path / "kept")
+        vstore.open()
+        try:
+            captioner = Captioner(
+                vstore,
+                context,
+                lambda: cfg,
+                asyncio.create_task,
+                SimpleNamespace(debug=lambda *_: None),
+            )
+            kept = KeptImage(0, "original", "", str(tmp_path / "image.jpg"))
+            got = await captioner.describe_for_tool(UMO, kept, "")
+
+            expected = {"success": "首选结果", "all_failed": ""}.get(
+                first_result, "后备结果"
+            )
+            assert got == expected
+            assert first.await_count == (1 if first_result == "success" else 2)
+            assert second.await_count == (
+                0
+                if first_result == "success"
+                else 2
+                if first_result == "all_failed"
+                else 1
+            )
+            if first_result == "all_failed":
+                assert vstore.stats()[1] == 0
+        finally:
+            vstore.close()
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("index", [1, 2])
+def test_read_image_uses_full_caption_for_selected_image(
+    tmp_path: Path, index: int
+) -> None:
+    """账本文本含方括号和混合占位符时，仍按图片编号返回完整精确缓存。"""
+    from unittest.mock import AsyncMock
+    from irmia.config import IrmiaConfig
+    from irmia.read_image_tool import execute_read_image
+    from irmia.vision_describe import Captioner
+
+    async def _run() -> None:
+        store = IrmiaStore(tmp_path / "ledger")
+        await store.open()
+        vstore = VisionStore(tmp_path / "vision.db", tmp_path / "kept")
+        vstore.open()
+        context = SimpleNamespace(
+            get_using_provider_async=AsyncMock(
+                side_effect=AssertionError("应使用精确缓存")
+            )
+        )
+        captioner = Captioner(
+            vstore,
+            context,
+            IrmiaConfig,
+            asyncio.create_task,
+            SimpleNamespace(debug=lambda *_: None),
+        )
+        try:
+            msg_id = await store.ensure_message_recorded(
+                umo=UMO,
+                text="[图片: 截图包含 [SUCCESS] 后面还有重要内容] [图片]",
+                platform_message_id="p-images",
+            )
+            for idx in range(2):
+                path = tmp_path / f"image-{idx}.jpg"
+                path.write_bytes(b"cached image; no decoder required")
+                vstore.add_kept(UMO, "p-images", idx, f"sha-{idx}", "", str(path))
+                vstore.put_desc(
+                    f"sha-{idx}",
+                    KIND_FULL,
+                    "",
+                    "",
+                    "model",
+                    f"第 {idx + 1} 张完整描述 [SUCCESS] 后面还有重要内容",
+                )
+            out = await execute_read_image(
+                store=store,
+                vstore=vstore,
+                captioner=captioner,
+                sid=UMO,
+                msg_id=msg_id,
+                index=index,
+                keep_days=3,
+            )
+
+            assert out == f"第 {index} 张完整描述 [SUCCESS] 后面还有重要内容"
+            context.get_using_provider_async.assert_not_awaited()
+        finally:
+            vstore.close()
+            await store.close()
 
     asyncio.run(_run())

@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import re
 import uuid
-from typing import Any, Awaitable, Callable, Sequence
+from typing import Any, AsyncIterator, Awaitable, Callable, Sequence
 
 from .config import IrmiaConfig
 from .store import ChannelMessageRow
@@ -162,52 +162,56 @@ class Captioner:
         self._semaphore = asyncio.Semaphore(CAPTION_CONCURRENCY)
         self._inflight: dict[tuple[str, str, str], asyncio.Task[str]] = {}
 
-    async def _provider(self, umo: str) -> Any:
-        """优先用 AstrBot 指定的识图模型，其次插件配置的降级链，最后会话默认模型。"""
+    async def _providers(self, umo: str) -> AsyncIterator[Any]:
+        """按核心识图模型、插件降级链、会话默认模型的顺序给出去重候选。"""
         cfg = self.cfg_getter()
         core_id = read_core_caption_provider_id(self.context, umo)
-        for provider_id in [core_id, *(cfg.vision_provider_ids or [])]:
+        seen: set[int] = set()
+        for provider_id in dict.fromkeys([core_id, *(cfg.vision_provider_ids or [])]):
             if not provider_id:
                 continue
             try:
                 provider = self.context.get_provider_by_id(provider_id)
             except Exception:
-                provider = None
-            if provider is not None:
-                return provider
+                continue
+            if provider is not None and id(provider) not in seen:
+                seen.add(id(provider))
+                yield provider
+
         try:
-            return await self.context.get_using_provider_async(umo=umo)
+            provider = await self.context.get_using_provider_async(umo=umo)
         except Exception:
             try:
-                return await self.context.get_using_provider_async()
+                provider = await self.context.get_using_provider_async()
             except Exception:
-                return None
+                return
+        if provider is not None and id(provider) not in seen:
+            yield provider
 
     async def _describe(self, umo: str, kept: KeptImage, question: str) -> str:
-        """在统一并发额度内单图识别，成功后写入缓存。"""
+        """在统一并发额度内依次尝试识图模型，成功后写入缓存。"""
         cfg = self.cfg_getter()
         base_prompt = read_core_caption_prompt(self.context, umo)
         prompt = build_qa_prompt(base_prompt, question) if question else base_prompt
         kind = KIND_QA if question else KIND_FULL
         async with self._semaphore:
-            provider = await self._provider(umo)
-            if provider is None:
-                return ""
-            text, model_id = await describe_once(
-                provider, kept.path, prompt, cfg.vision_timeout_sec, self.logger
-            )
-            text = sanitize_caption_text(text)
-            if text:
-                await asyncio.to_thread(
-                    self.vstore.put_desc,
-                    kept.sha256,
-                    kind,
-                    question,
-                    kept.dhash,
-                    model_id,
-                    text,
+            async for provider in self._providers(umo):
+                text, model_id = await describe_once(
+                    provider, kept.path, prompt, cfg.vision_timeout_sec, self.logger
                 )
-            return text
+                text = sanitize_caption_text(text)
+                if text:
+                    await asyncio.to_thread(
+                        self.vstore.put_desc,
+                        kept.sha256,
+                        kind,
+                        question,
+                        kept.dhash,
+                        model_id,
+                        text,
+                    )
+                    return text
+        return ""
 
     def _task_for(
         self, umo: str, kept: KeptImage, question: str = ""

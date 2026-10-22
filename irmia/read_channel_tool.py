@@ -224,6 +224,7 @@ async def execute_read_channel(
         rows = store.fetch_messages(
             target_sid,
             after_id=start_id - 1,
+            before_id=end_id + 1,
             limit=max(1, end_id - start_id + 1),
             asc=True,
         )
@@ -340,9 +341,6 @@ async def execute_read_channel(
         )
         segment_total = store.count_topic_segments(target_sid, after_id=prev_read_id)
 
-    store.clear_pending_bot_speeches(target_sid)
-    await store.update_read_state(target_sid, read_up_to_id=new_read_up_to)
-
     if segments:
         older_cnt = segment_total - len(segments)
         head = f"{target_sid} · {plain_label}"
@@ -363,11 +361,27 @@ async def execute_read_channel(
             out.append(
                 f"再往前 {older_cnt} 段不在这一屏，{_paging_hint(oldest_start, True)}。"
             )
-        return "\n".join(out)
+        latest_segment_end = max(int(seg["end_msg_id"]) for seg in segments)
+        tail = [row for row in pool if row.id > latest_segment_end]
+        if tail:
+            shown = tail[-eff_limit:]
+            out.extend(["", f"尚未成段的最近 {len(shown)} 条："])
+            out.extend(
+                _render_rows(shown, _mentioned_ids(shown), await _captions(shown))
+            )
+            if len(shown) == eff_limit and store.fetch_messages(
+                target_sid, after_id=latest_segment_end, before_id=shown[0].id, limit=1
+            ):
+                out.append(f"还有更早的未成段消息，{_paging_hint(shown[0].id, True)}。")
+        output = "\n".join(out)
+    else:
+        # 默认模式：无段兜底，给最新原文
+        shown = pool[-eff_limit:]
+        output = await _render_block(shown, _mentioned_ids(shown))
 
-    # 默认模式：无段兜底，给最新原文
-    shown = pool[-eff_limit:]
-    return await _render_block(shown, _mentioned_ids(shown))
+    store.clear_pending_bot_speeches(target_sid)
+    await store.update_read_state(target_sid, read_up_to_id=new_read_up_to)
+    return output
 
 
 @pydantic_dataclass
