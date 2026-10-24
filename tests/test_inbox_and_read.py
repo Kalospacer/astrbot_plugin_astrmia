@@ -183,7 +183,7 @@ def test_render_mention_notice_and_session_list(tmp_path: Path) -> None:
         topic="讨论周末聚餐地点",
     )
     assert "18:30，摸鱼群 里有人@了你（是 阿强）" in notice
-    assert "那边一共有 12 条未读" in notice
+    assert "该会话共 12 条未读" in notice
     assert "那边在聊：讨论周末聚餐地点。" in notice
     assert "read_channel" in notice
 

@@ -94,6 +94,7 @@ def build_self_brief(
     topic_max_chars: int = 24,
     mention_inline: bool = True,
     segment_msg_count: int = 25,
+    topic_summary_enabled: bool = True,
 ) -> str:
     """拼接注入主脑的静态装置自述，放在 system_prompt 稳定前缀里。
 
@@ -102,42 +103,52 @@ def build_self_brief(
         topic_max_chars: 清单里话题的字数上限。
         mention_inline: 点名通知是否已内嵌消息与前后文。
         segment_msg_count: 群消息切成一段需要多少条。
+        topic_summary_enabled: 是否展示话题概括与段目录说明。
 
     Returns:
         装置自述文本。
     """
     reply_rules = [
-        "- 谁叫醒你，你直接写的字就回给谁。",
-        "- 不想回，只写 [SILENT]，这句不会发出去。",
-        "- 给别的群或别的人发消息用 send_message_to_user，session 填对方的 sid。",
-        "- 心跳醒来时没人在等你，直接写的字谁也收不到，想说话只能用 send_message_to_user。",
+        "- 直接输出的文本回复给唤醒你的会话。",
+        "- 不回复时仅输出 [SILENT]，该输出不会被发送。",
+        "- 向其他会话发送消息使用 send_message_to_user，session 填目标 sid。",
+        "- 自主唤醒轮次没有等待回复的对象，直接输出的文本不会被发送，需要发言时使用 send_message_to_user。",
     ]
     if intercept_direct_reply:
         reply_rules.append(
-            "- 已经用 send_message_to_user 发到了叫醒你的会话，后面直接写的字就不再发。"
+            "- 本轮已用 send_message_to_user 发送到唤醒你的会话时，末尾直接输出的文本不再发送。"
         )
+
+    group_rules = (
+        [
+            f"- 会话清单显示分段数量，点名通知显示未读条数。每 {segment_msg_count} 条消息为一段，附一句摘要。",
+            f"- 未唤醒你的群消息仅记为未读，不触发唤醒。清单中显示分段数与 {topic_max_chars} 字以内的话题摘要。",
+            "- 使用 read_channel(sid=...) 查看。",
+        ]
+        if topic_summary_enabled
+        else [
+            "- 未唤醒你的群消息仅记为未读，不触发唤醒。",
+            "- 使用 read_channel(sid=...) 查看最近原文，传 before=<消息编号> 向前翻页。",
+        ]
+    )
 
     return "\n".join(
         [
             SELF_BRIEF_HEADER,
-            "所有私聊和群聊接到同一个你，记忆连着。每个会话有一个 sid，在下面的会话清单里。",
+            "所有私聊与群聊共享同一段记忆。每个会话有一个 sid，见下方会话清单。",
             "",
-            "怎么说话：",
+            "回复规则：",
             *reply_rules,
             "",
-            "要不要回：",
-            "- 管理员私聊，基本都要回。",
-            "- 别人的消息和群消息你看得到，但不欠谁回复。跟你无关或不想理，可以不回。",
-            "- 群里被 @ 或被叫到名字，通知里附了叫你的那几句和前后文，看完决定接不接；不够再用 read_channel 翻。"
+            "回复义务：",
+            "- 管理员私聊原则上均需回复。",
+            "- 其他会话消息不承担必须回复的义务，与己无关或无意参与时可以不回复。",
+            "- 群聊被 @ 或命中关键词时，通知内已附带相关消息及前后文，据此判断是否回应；信息不足时用 read_channel 查看更多。"
             if mention_inline
-            else "- 群里被 @ 或被叫到名字，通知只告诉你有人在叫你。先用 read_channel 看前后文，再决定接不接。",
+            else "- 群聊被 @ 或命中关键词时，通知仅提示有人唤醒，先用 read_channel 查看上下文再决定是否回应。",
             "",
             "群消息：",
-            f"- 清单给段数，点名通知说那边攒了多少条。一段 {segment_msg_count} 条，带一句总结。",
-            f"- 群里没叫你的消息只记成未读，不叫醒你。清单里有段数和一句 {topic_max_chars} 字以内的话题。",
-            "- 想看用 read_channel(sid=...)。",
-            "",
-            "管理员不在线多半是在忙或在睡。心跳醒来想说话，或者觉得哪个群有意思，用 send_message_to_user 过去说。",
+            *group_rules,
         ]
     )
 
@@ -148,8 +159,9 @@ def render_session_list(
     tz_name: str = "Asia/Shanghai",
     max_items: int = 8,
     now_ts: float | None = None,
+    show_topic: bool = True,
 ) -> str:
-    """渲染会话清单，行尾带段数与「我上次在这说话」。"""
+    """渲染会话清单，按开关显示话题和段数，并保留最近说话时间。"""
     if not sessions:
         return "外部会话：还没收到过任何外部消息。"
     now = now_ts if now_ts is not None else datetime.now(tz=timezone.utc).timestamp()
@@ -162,10 +174,10 @@ def render_session_list(
         when = format_local_stamp(s.last_ts, tz_name)
         segment_part = (
             f"｜今天 {s.today_segments} 段 / 历史 {s.history_segments} 段"
-            if is_group_umo(s.umo)
+            if show_topic and is_group_umo(s.umo)
             else ""
         )
-        topic_part = f"｜在聊：{s.topic}" if s.topic.strip() else ""
+        topic_part = f"｜在聊：{s.topic}" if show_topic and s.topic.strip() else ""
         my_last_part = (
             f"｜我上次在这说话：{format_ago(now - s.my_last_ts)}"
             if s.my_last_ts > 0
@@ -216,12 +228,12 @@ def render_mention_notice(
 
     if unread <= 0:
         return (
-            f"{head}，这条你还没看。{talking}"
-            f"想看就用 read_channel(sid={umo})。回不回你自己定。"
+            f"{head}，该消息尚未查看。{talking}"
+            f"使用 read_channel(sid={umo}) 查看。是否回复由你决定。"
         )
     return (
-        f"{head}，那边一共有 {unread} 条未读。{talking}"
-        f"想看就用 read_channel(sid={umo})。只看叫你的那几句就把 limit 调小，想全看就调大。回不回你自己定。"
+        f"{head}，该会话共 {unread} 条未读。{talking}"
+        f"使用 read_channel(sid={umo}) 查看，limit 参数控制返回条数。是否回复由你决定。"
     )
 
 
@@ -239,10 +251,10 @@ def render_mention_notice_with_digest(
     """生成已附读群结果的点名通知，保留消息编号与翻页指路。"""
     head = _mention_head(where_name, caller_name, is_at, at_label)
     return (
-        f"{head}，那边一共有 {unread} 条未读。{_talking(topic)}\n"
-        f"下面是叫你的消息和前后文，已经替你读过并标记已读了，不用再 read_channel 这个群（sid={umo}）：\n"
+        f"{head}，该会话共 {unread} 条未读。{_talking(topic)}\n"
+        f"以下为命中的消息及前后文，已读并更新水位，无需再次 read_channel 该会话（sid={umo}）：\n"
         f"{digest}\n"
-        "想看更早的，照上面的提示传 before 给 read_channel。回不回你自己定。"
+        "需要更早的记录时按上方提示传 before 参数。是否回复由你决定。"
     )
 
 

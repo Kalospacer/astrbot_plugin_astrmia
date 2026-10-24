@@ -96,13 +96,6 @@ class AstrMiaPlugin(Star):
         report = await self.runtime.status_report()
         yield event.plain_result(report)
 
-    @filter.permission_type(PermissionType.ADMIN)
-    @astrmia_group.command("wake")
-    async def cmd_astrmia_wake(self, event: AstrMessageEvent, note: str = ""):
-        """手动触发一次全局主脑静默唤醒。"""
-        res = await self.runtime.trigger_wake_turn(manual_note=note)
-        yield event.plain_result(f"[AstrMia 唤醒完成] {res}")
-
     @filter.command_group("irmia")
     def irmia_group(self) -> None:
         """IRMIA 管理指令组（兼容别名）。"""
@@ -115,9 +108,3 @@ class AstrMiaPlugin(Star):
         report = await self.runtime.status_report()
         yield event.plain_result(report)
 
-    @filter.permission_type(PermissionType.ADMIN)
-    @irmia_group.command("wake")
-    async def cmd_wake(self, event: AstrMessageEvent, note: str = ""):
-        """手动触发一次全局主脑静默唤醒。"""
-        res = await self.runtime.trigger_wake_turn(manual_note=note)
-        yield event.plain_result(f"[AstrMia 唤醒完成] {res}")

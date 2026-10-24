@@ -246,7 +246,7 @@ def test_runtime_end_to_end_flow(tmp_path: Path) -> None:
         notice = grp_mention.get_extra("irmia_mention_notice")
         assert isinstance(notice, str) and "提到了你" in notice
         assert "清漪快来帮我看看这道题" in notice
-        assert "标记已读" in notice
+        assert "已读" in notice
         assert grp_mention.get_extra("irmia_repeat_reads") == {}
         assert req.prompt == notice
         assert req.image_urls == []
@@ -334,7 +334,7 @@ def test_runtime_end_to_end_flow(tmp_path: Path) -> None:
 
 
 def test_runtime_batch_debounce_switches(tmp_path: Path) -> None:
-    """验证私聊与群聊防抖攒批独立开关、窗口共用与连续私聊消息完整聚合。"""
+    """验证消息合并窗口：连续消息聚合、窗口为 0 时立即放行。"""
 
     async def _run() -> None:
         ctx = FakeContext()
@@ -344,8 +344,6 @@ def test_runtime_batch_debounce_switches(tmp_path: Path) -> None:
             "master_umo": "aiocqhttp:FriendMessage:114514",
             "mention_keywords": ["清漪"],
             "contacts_map": ["114514 = 哥哥"],
-            "group_batch_enabled": True,
-            "private_batch_enabled": True,
             "group_batch_window_sec": 0.05,
             "intercept_direct_reply": False,
         }
@@ -408,8 +406,8 @@ def test_runtime_batch_debounce_switches(tmp_path: Path) -> None:
         # 验证前序事件的图片被合并到 req.image_urls
         assert "http://example.com/item1.png" in req.image_urls
 
-        # 2. 测试关闭私聊防抖开关 (private_batch_enabled = False)
-        cfg["private_batch_enabled"] = False
+        # 2. 合并窗口设为 0 等效禁用合并，私聊消息立即放行
+        cfg["group_batch_window_sec"] = 0
         ev_no_batch = FakeEvent(
             priv_umo,
             "单发不等待",
@@ -420,8 +418,8 @@ def test_runtime_batch_debounce_switches(tmp_path: Path) -> None:
         await rt.on_incoming_event(ev_no_batch)
         assert ev_no_batch.stopped is False
 
-        # 3. 测试群聊防抖开关开启时，两条连续点名合并
-        cfg["group_batch_enabled"] = True
+        # 3. 恢复合并窗口，两条连续点名合并为一次唤醒
+        cfg["group_batch_window_sec"] = 0.05
         grp_umo = "aiocqhttp:GroupMessage:888888"
         grp_ev1 = FakeEvent(
             grp_umo,
@@ -451,8 +449,8 @@ def test_runtime_batch_debounce_switches(tmp_path: Path) -> None:
         assert grp_ev1.stopped is True
         assert grp_ev2.stopped is False
 
-        # 4. 测试群聊防抖开关关闭 (group_batch_enabled = False)
-        cfg["group_batch_enabled"] = False
+        # 4. 合并窗口为 0 时群聊点名立即放行
+        cfg["group_batch_window_sec"] = 0
         grp_ev3 = FakeEvent(
             grp_umo,
             "清漪3立即响应",

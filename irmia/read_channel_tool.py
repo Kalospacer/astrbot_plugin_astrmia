@@ -30,15 +30,27 @@ READ_CHANNEL_MENTION_CONTEXT = 10
 SELF_SPEAK_LABEL = "（我）"
 MENTION_ROW_MARK = "▶ "
 
-READ_CHANNEL_DESCRIPTION = (
-    "读某个群或私聊的消息，也包括你自己在那边说过的话（行首写着（我））。"
-    "不带参数返回最近的段目录，一段是 {segment_msg_count} 条消息加一句总结；"
-    "没攒够一段的群给最新原文。"
-    "传 segment=<编号> 展开某段原文，传 before=<消息编号> 往前翻历史。"
-    "读一次即清空该会话未读，翻页不改已读。"
-    "要说话用 send_message_to_user。"
-    "图片带一句描述，细节用 read_image，传 sid 和行首的 #编号。"
-)
+
+def read_channel_description(
+    summary_enabled: bool,
+    *,
+    segment_msg_count: int = IrmiaConfig.segment_msg_count,
+) -> str:
+    """按话题开关生成读群工具描述，开启时保留段目录说明。"""
+    reading_mode = (
+        f"不带参数返回最近的段目录，一段是 {segment_msg_count} 条消息加一句总结；"
+        "没攒够一段的群给最新原文。"
+        "传 segment=<编号> 展开某段原文，传 before=<消息编号> 往前翻历史。"
+        if summary_enabled
+        else "不带参数返回最近的原文，传 before=<消息编号> 往前翻历史。"
+    )
+    return (
+        "读某个群或私聊的消息，也包括你自己在那边说过的话（行首写着（我））。"
+        f"{reading_mode}"
+        "读一次即清空该会话未读，翻页不改已读。"
+        "要说话用 send_message_to_user。"
+        "图片带一句描述，细节用 read_image，传 sid 和行首的 #编号。"
+    )
 
 
 def _is_row_mentioning_me(
@@ -76,6 +88,7 @@ async def execute_read_channel(
     limit: int | None = None,
     segment: int | None = None,
     segment_page: int = READ_CHANNEL_SEGMENT_PAGE,
+    summary_enabled: bool = True,
     contacts_map: dict[str, str] | None = None,
     mention_keywords: Sequence[str] = (),
     bot_self_ids: set[str] | None = None,
@@ -212,7 +225,7 @@ async def execute_read_channel(
         return "\n".join(out)
 
     # 展开某段，不动已读
-    if segment is not None:
+    if summary_enabled and segment is not None:
         seg_id = int(segment)
         seg = store.get_topic_segment(seg_id)
         if seg is None:
@@ -335,7 +348,7 @@ async def execute_read_channel(
 
     segments: list[dict[str, Any]] = []
     segment_total = 0
-    if is_group:
+    if is_group and summary_enabled:
         segments = store.list_topic_segments(
             target_sid, after_id=prev_read_id, limit=max(1, int(segment_page))
         )
@@ -389,9 +402,7 @@ class ReadChannelTool(FunctionTool):
     """read_channel 工具。"""
 
     name: str = "read_channel"
-    description: str = READ_CHANNEL_DESCRIPTION.format(
-        segment_msg_count=IrmiaConfig.segment_msg_count
-    )
+    description: str = read_channel_description(True)
     parameters: dict = Field(
         default_factory=lambda: {
             "type": "object",
@@ -402,7 +413,7 @@ class ReadChannelTool(FunctionTool):
                 },
                 "segment": {
                     "type": "integer",
-                    "description": "段编号。展开该段全部原文，不动未读。",
+                    "description": "段编号，仅话题概括开启时生效。展开该段全部原文，不动未读。",
                 },
                 "before": {
                     "type": "integer",

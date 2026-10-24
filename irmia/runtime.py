@@ -19,9 +19,9 @@ from .heartbeat import HeartbeatEngine, HeartbeatFiring
 from .inbox import GroupBatcher, evaluate_channel_message
 from .mention import build_mention_notice
 from .read_channel_tool import (
-    READ_CHANNEL_DESCRIPTION,
     ReadChannelTool,
     execute_read_channel,
+    read_channel_description,
 )
 from .read_image_tool import READ_IMAGE_DESCRIPTION, ReadImageTool, execute_read_image
 from .render import (
@@ -333,8 +333,9 @@ class IrmiaRuntime:
             add_llm_tools(
                 ReadChannelTool(
                     handler_fn=self._handle_read_channel_tool,
-                    description=READ_CHANNEL_DESCRIPTION.format(
-                        segment_msg_count=self.cfg().segment_msg_count
+                    description=read_channel_description(
+                        self.cfg().topic_summary_enabled,
+                        segment_msg_count=self.cfg().segment_msg_count,
                     ),
                 ),
                 # 群聊消息里的图片用 read_image 看。
@@ -392,6 +393,7 @@ class IrmiaRuntime:
             limit=limit,
             segment=segment,
             segment_page=cfg.segment_rows_per_page,
+            summary_enabled=cfg.topic_summary_enabled,
             contacts_map=cfg.contacts_map,
             mention_keywords=cfg.mention_keywords,
             bot_self_ids=self._bot_self_ids,
@@ -554,12 +556,7 @@ class IrmiaRuntime:
             mention_keywords=cfg.mention_keywords,
         )
         batch_task: asyncio.Task[bool] | None = None
-        batch_enabled = (
-            cfg.private_batch_enabled
-            if decision.is_private
-            else cfg.group_batch_enabled and decision.should_wake
-        )
-        if not is_command and batch_enabled and cfg.group_batch_window_sec > 0:
+        if not is_command and decision.should_wake and cfg.group_batch_window_sec > 0:
             item = (
                 {"text": raw_str or text, "images": _collect_event_image_urls(event)}
                 if decision.is_private
@@ -603,11 +600,12 @@ class IrmiaRuntime:
         # 群聊未点名 -> 拦截进信箱，不唤醒主脑，按条件后台概括话题
         if not decision.should_wake:
             event.stop_event()
-            self._spawn_bg(
-                self.topic_summarizer.maybe_summarize(
-                    umo, cfg, force_for_mention=False
+            if cfg.topic_summary_enabled:
+                self._spawn_bg(
+                    self.topic_summarizer.maybe_summarize(
+                        umo, cfg, force_for_mention=False
+                    )
                 )
-            )
             return
 
         # 群聊已点名 -> 归零心跳计时，执行防大喘气攒批等待
@@ -626,10 +624,12 @@ class IrmiaRuntime:
 
         # 不在这里等话题概括：先保存上一次缓存的话题，概括扔后台跑，跑完给下次用。
         # 通知卡等聊天回合取得主脑锁后再生成。排队期间已读水位会变。
-        cached_topic = str(st.get("topic", "") or "")
-        self._spawn_bg(
-            self.topic_summarizer.maybe_summarize(umo, cfg, force_for_mention=True)
-        )
+        cached_topic = ""
+        if cfg.topic_summary_enabled:
+            cached_topic = str(st.get("topic", "") or "")
+            self._spawn_bg(
+                self.topic_summarizer.maybe_summarize(umo, cfg, force_for_mention=True)
+            )
 
         where_name = self.store.resolve_session_name(
             umo,
@@ -774,6 +774,7 @@ class IrmiaRuntime:
             cfg.topic_max_chars,
             mention_inline=cfg.mention_inline_enabled,
             segment_msg_count=cfg.segment_msg_count,
+            topic_summary_enabled=cfg.topic_summary_enabled,
         )
         workspace_note = ""
         if hasattr(req, "system_prompt"):
@@ -814,6 +815,7 @@ class IrmiaRuntime:
                         ),
                         tz,
                         cfg.session_list_max,
+                        show_topic=cfg.topic_summary_enabled,
                     ),
                 ]
             )
@@ -1170,12 +1172,7 @@ class IrmiaRuntime:
         )
         await self.trigger_wake_turn(firing=firing)
 
-    async def trigger_wake_turn(
-        self,
-        *,
-        firing: HeartbeatFiring | None = None,
-        manual_note: str | None = None,
-    ) -> str:
+    async def trigger_wake_turn(self, *, firing: HeartbeatFiring) -> str:
         """发起静默唤醒：思考与聊天并行，仅末尾小结写回取锁、排在聊天之后。"""
         master_umo = await self.resolve_master_umo()
         if not master_umo:
@@ -1184,15 +1181,14 @@ class IrmiaRuntime:
             return "上一次唤醒还没结束，这次先不叫醒。"
         self._wake_running = True
         try:
-            return await self._run_wake_turn(master_umo, firing, manual_note)
+            return await self._run_wake_turn(master_umo, firing)
         finally:
             self._wake_running = False
 
     async def _run_wake_turn(
         self,
         master_umo: str,
-        firing: HeartbeatFiring | None,
-        manual_note: str | None,
+        firing: HeartbeatFiring,
     ) -> str:
         """不持主脑锁跑原生 Agent 唤醒，做过事则在末尾排队写入轻量小结。"""
         from astrbot.core.agent.tool import ToolSet
@@ -1208,18 +1204,9 @@ class IrmiaRuntime:
         cfg = self.cfg()
         session = MessageSession.from_str(master_umo)
 
-        if firing is not None:
-            prompt_text = render_heartbeat_prompt(
-                cfg.heartbeat_prompt, firing.quiet_seconds, firing.idle_ticks
-            )
-        elif manual_note:
-            prompt_text = f"[手动唤醒] {manual_note}"
-        else:
-            prompt_text = render_heartbeat_prompt(
-                cfg.heartbeat_prompt,
-                self.heartbeat.quiet_ms() / 1000.0,
-                self.heartbeat.idle_ticks,
-            )
+        prompt_text = render_heartbeat_prompt(
+            cfg.heartbeat_prompt, firing.quiet_seconds, firing.idle_ticks
+        )
 
         wake_event = HeartbeatWakeEvent(
             context=self.context,
@@ -1317,8 +1304,8 @@ class IrmiaRuntime:
         if reply_text == "[SILENT]":
             reply_text = ""
 
-        # 空拍（没调过工具、手动唤醒也没有有效结果）不调小结模型、不往主脑历史写任何东西
-        if req.tool_calls_result or (manual_note is not None and reply_text):
+        # 空拍（没调过工具）不调小结模型、不往主脑历史写任何东西
+        if req.tool_calls_result:
             await self._append_wake_summary(
                 master_umo, wake_event, req, prompt_text, reply_text, cfg
             )
@@ -1339,10 +1326,10 @@ class IrmiaRuntime:
         if req.conversation is None:
             return
         provider = await self.topic_summarizer.resolve_provider(
-            master_umo, cfg.light_provider_id
+            master_umo, cfg.heartbeat_provider_id
         )
         if provider is None:
-            self.logger.warning("[IRMIA] 唤醒小结跳过：没有可用的轻量模型")
+            self.logger.warning("[IRMIA] 唤醒小结跳过：没有可用的心跳模型")
             return
         material = build_wake_material(prompt_text, req.tool_calls_result, reply_text)
         try:
@@ -1390,14 +1377,15 @@ class IrmiaRuntime:
             "=== AstrMia 运行状态 ===",
             f"总开关：{'开启' if cfg.enabled else '关闭'}",
             f"全局主脑会话：{master_umo or '（待管理员首次私聊自动绑定）'}",
+            f"话题概括：{'开启' if cfg.topic_summary_enabled else '关闭'}",
             f"AstrHe 账本/关系本联动：{astrhe_linked}",
             f"工具已发到当前窗口时收起末尾回复：{'开启' if cfg.intercept_direct_reply else '关闭（默认直出，输出 [SILENT] 静默）'}",
-            f"呼吸心跳：{'开启' if cfg.heartbeat_enabled else '关闭'} "
+            f"自主唤醒：{'开启' if cfg.heartbeat_enabled else '关闭'} "
             f"（区间 {dist.floor_ms / 60000:.0f}~{dist.ceil_ms / 60000:.0f}m · "
             f"目标均值 {dist.mean_ms / 60000:.1f}m · α={dist.alpha:.4f}）",
             self.quiet_window_note(cfg),
             f"识图缓存：{await self._vision_cache_note(cfg)}",
-            f"当前安静时长：{quiet_min:.1f} 分钟（下一拍抽中概率 p={cur_p:.3f}，这段时间自己醒了 {self.heartbeat.idle_ticks} 次）",
+            f"当前空闲时长：{quiet_min:.1f} 分钟（下次抽签命中概率 p={cur_p:.3f}，本轮空闲期内已唤醒 {self.heartbeat.idle_ticks} 次）",
             f"已知外部会话数：{len(sessions)}",
         ]
         for s in sessions[: cfg.session_list_max]:
@@ -1408,11 +1396,13 @@ class IrmiaRuntime:
                 s.last_sender_name,
                 cfg.contacts_map,
             )
-            topic_str = f" · 话题：{s.topic}" if s.topic else ""
+            topic_str = (
+                f" · 话题：{s.topic}" if cfg.topic_summary_enabled and s.topic else ""
+            )
             seg_str = (
                 f"今天 {s.today_segments} 段 / 历史 {s.history_segments} 段"
-                if is_group_umo(s.umo)
-                else "私聊"
+                if cfg.topic_summary_enabled and is_group_umo(s.umo)
+                else ("群聊" if is_group_umo(s.umo) else "私聊")
             )
             lines.append(
                 f"  - {name} ({s.umo})：{seg_str} / 未读 {s.unread} / 总计 {s.total_messages}{topic_str}"

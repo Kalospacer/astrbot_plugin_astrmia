@@ -1,6 +1,6 @@
 name: astrbot_plugin_astrmia
 display_name: AstrMia
-desc: 所有私聊和群聊共用同一段记忆，群消息先攒着不打断，没人说话时她自己醒来看看。可配合 AstrHe 使用。
+desc: 让 AstrBot 在所有群聊与私聊间共享同一段记忆：未唤醒的消息进入未读信箱并自动生成话题摘要，空闲时按概率自主唤醒、主动查看会话并发送消息。可配合 AstrHe 共用聊天账本。
 version: v0.1.0
 author: Kalo & Qingyi
 repo: https://github.com/Kalospacer/astrbot_plugin_astrmia

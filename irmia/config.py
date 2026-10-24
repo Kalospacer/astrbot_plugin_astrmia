@@ -6,13 +6,13 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
-DEFAULT_HEARTBEAT_PROMPT = """[心跳] 已经 {quiet_min} 分钟没人私聊你、也没人在群里叫你了。这是第 {idle_ticks} 次自己醒来。
+DEFAULT_HEARTBEAT_PROMPT = """[自主唤醒] 距上次有人私聊或在群中唤醒你已 {quiet_min} 分钟，本轮空闲期内第 {idle_ticks} 次唤醒。
 
-1. 对一遍待办和规划。规划用 astrhe_read_plan，待办用 astrhe_read_todos。答应过别人的事挑一件现在能做的做，做完用 astrhe_todo_update 记一笔；过时的标成放弃。
-2. 聊天里冒出来的新约定用 astrhe_todo_add 记下，挂到用得上它的会话。计划变了用 astrhe_todo_edit 或 astrhe_plan_edit 改。
-3. 现在做不了的用 astrhe_schedule 定个时间，到点会叫醒你。
-4. 看会话清单，用 read_channel 翻你在意的群和人。有能接的话就用 send_message_to_user 说一句，一次一件事、只发一条，发完就等。
-5. 对方在忙在睡，或者你刚在那边说过话，安静结束这一拍。"""
+1. 核对待办与规划：规划用 astrhe_read_plan，待办用 astrhe_read_todos。选取一件当前可完成的事项执行，完成后用 astrhe_todo_update 记录；已失效的条目标记为放弃。
+2. 对话中出现的新约定用 astrhe_todo_add 记录并关联对应会话；计划变更用 astrhe_todo_edit 或 astrhe_plan_edit 更新。
+3. 暂时无法处理的事项用 astrhe_schedule 设定提醒时间，到期将自动唤醒。
+4. 查看会话清单，用 read_channel 检查关注的会话。有可参与的话题时用 send_message_to_user 发送一条消息，每次仅处理一件事，发送后等待。
+5. 无可执行事项，或目标联系人近期已交互过时，不发送任何消息，静默结束本轮。"""
 
 
 def _coerce_number(
@@ -55,12 +55,11 @@ class IrmiaConfig:
     master_umo: str = ""
     mention_keywords: list[str] = field(default_factory=list)
     contacts_map: dict[str, str] = field(default_factory=dict)
-    group_batch_enabled: bool = True
-    private_batch_enabled: bool = True
     group_batch_window_sec: float = 3.0
     mention_inline_enabled: bool = True
     mention_inline_limit: int = 20
     light_provider_id: str = ""
+    topic_summary_enabled: bool = True
     topic_min_unread: int = 5
     topic_cooldown_sec: int = 180
     heartbeat_enabled: bool = True
@@ -73,7 +72,6 @@ class IrmiaConfig:
     heartbeat_quiet_start_hour: int = 22
     heartbeat_quiet_end_hour: int = 8
     intercept_direct_reply: bool = False
-    topic_image_caption_enabled: bool = True
     image_keep_days: int = 3
     read_channel_image_enabled: bool = True
     read_channel_image_max: int = 6
@@ -192,10 +190,10 @@ def load_irmia_config(raw: dict[str, Any] | None) -> IrmiaConfig:
             min_value=minimum,
         )
 
-    def _group_int(group: str, key: str, default: int) -> int:
+    def _group_int(group: str, key: str, default: int, minimum: int = 1) -> int:
         section = cfg.get(group)
         value = section.get(key, default) if isinstance(section, dict) else default
-        return _coerce_int(value, default=default, min_value=1)
+        return _coerce_int(value, default=default, min_value=minimum)
 
     def _batch_window() -> float:
         return _coerce_number(
@@ -210,9 +208,9 @@ def load_irmia_config(raw: dict[str, Any] | None) -> IrmiaConfig:
     )
 
     floor_min, ceil_min, target_mean = normalize_heartbeat_mins(
-        _int("heartbeat_floor_min", 5, minimum=1),
-        _int("heartbeat_ceil_min", 60, minimum=3),
-        _int("heartbeat_target_mean_min", 15, minimum=2),
+        _group_int("heartbeat_options", "floor_min", 5),
+        _group_int("heartbeat_options", "ceil_min", 60),
+        _group_int("heartbeat_options", "target_mean_min", 15),
     )
 
     return IrmiaConfig(
@@ -220,14 +218,13 @@ def load_irmia_config(raw: dict[str, Any] | None) -> IrmiaConfig:
         master_umo=str(cfg.get("master_umo", "") or "").strip(),
         mention_keywords=keywords,
         contacts_map=parse_contacts_map(cfg.get("contacts_map", [])),
-        group_batch_enabled=bool(cfg.get("group_batch_enabled", True)),
-        private_batch_enabled=bool(cfg.get("private_batch_enabled", True)),
         group_batch_window_sec=_batch_window(),
         mention_inline_enabled=bool(cfg.get("mention_inline_enabled", True)),
-        mention_inline_limit=_int("mention_inline_limit", 20, minimum=1),
+        mention_inline_limit=_group_int("display_options", "inline_limit", 20),
         light_provider_id=str(cfg.get("light_provider_id", "") or "").strip(),
-        topic_min_unread=_int("topic_min_unread", 5, minimum=1),
-        topic_cooldown_sec=_int("topic_cooldown_sec", 180),
+        topic_summary_enabled=bool(cfg.get("topic_summary_enabled", True)),
+        topic_min_unread=_group_int("topic_options", "min_unread", 5),
+        topic_cooldown_sec=_group_int("topic_options", "cooldown_sec", 180, minimum=0),
         heartbeat_enabled=bool(cfg.get("heartbeat_enabled", True)),
         heartbeat_provider_id=str(cfg.get("heartbeat_provider_id", "") or "").strip(),
         heartbeat_prompt=(
@@ -244,31 +241,28 @@ def load_irmia_config(raw: dict[str, Any] | None) -> IrmiaConfig:
             cfg.get("heartbeat_quiet_end_hour", 8), 8
         ),
         intercept_direct_reply=bool(cfg.get("intercept_direct_reply", False)),
-        topic_image_caption_enabled=bool(
-            cfg.get("topic_image_caption_enabled", True)
-        ),
         image_keep_days=_int("image_keep_days", 3),
         read_channel_image_enabled=bool(cfg.get("read_channel_image_enabled", True)),
-        read_channel_image_max=_int("read_channel_image_max", 6),
-        read_channel_image_wait_sec=_int("read_channel_image_wait_sec", 8),
-        image_brief_max_chars=_int("image_brief_max_chars", 80, minimum=1),
-        read_image_max_chars=_int("read_image_max_chars", 500, minimum=1),
+        read_channel_image_max=_group_int("vision_options", "image_max", 6),
+        read_channel_image_wait_sec=_group_int("vision_options", "wait_sec", 8),
+        image_brief_max_chars=_group_int("vision_options", "brief_max_chars", 80),
+        read_image_max_chars=_group_int("vision_options", "read_max_chars", 500),
         vision_provider_ids=[
             str(p).strip()
             for p in cfg.get("vision_provider_ids", [])
             if str(p).strip()
         ],
-        vision_timeout_sec=_int("vision_timeout_sec", 60, minimum=1),
-        vision_cache_ttl_days=_int("vision_cache_ttl_days", 30),
+        vision_timeout_sec=_group_int("vision_options", "timeout_sec", 60),
+        vision_cache_ttl_days=_group_int("vision_options", "cache_ttl_days", 30),
         topic_max_chars=_group_int("topic_options", "max_chars", 24),
         topic_line_max_chars=_group_int("topic_options", "line_max_chars", 120),
         segment_rows_per_page=_group_int("topic_options", "segment_rows_per_page", 10),
         segment_msg_count=_group_int("topic_options", "segment_msg_count", 25),
         segment_backfill_max=_group_int("topic_options", "segment_backfill_max", 5),
         light_timeout_sec=_group_int("topic_options", "timeout_sec", 10),
-        wake_summary_max_chars=_group_int("wake_options", "summary_max_chars", 60),
-        heartbeat_tick_sec=_group_int("wake_options", "tick_sec", 60),
-        wake_max_steps=_group_int("wake_options", "max_steps", 32),
+        wake_summary_max_chars=_group_int("heartbeat_options", "summary_max_chars", 60),
+        heartbeat_tick_sec=_group_int("heartbeat_options", "tick_sec", 60),
+        wake_max_steps=_group_int("heartbeat_options", "max_steps", 32),
         session_list_max=_group_int("display_options", "session_list_max", 8),
         quote_preview_chars=_group_int("display_options", "quote_preview_chars", 40),
     )

@@ -1,280 +1,301 @@
 {
   "enabled": {
-    "description": "总开关",
+    "description": "插件开关",
     "type": "bool",
     "default": true,
-    "hint": "关掉后群消息不进信箱、不自己醒来、不共用记忆。"
+    "hint": "关闭后群消息不再进入信箱、不注入共享记忆，也不触发自主唤醒。"
   },
   "master_umo": {
-    "description": "记忆存在哪个会话",
+    "description": "主会话绑定",
     "type": "string",
     "default": "",
-    "hint": "形如 aiocqhttp:FriendMessage:你的QQ号。留空自动选第一个私聊机器人的管理员。"
+    "hint": "全局共享记忆所属会话的 unified_msg_origin，格式 platform:MessageType:id，例如 aiocqhttp:FriendMessage:10001。留空时在首次收到管理员私聊时自动绑定。"
   },
   "mention_keywords": {
-    "description": "她的称呼",
+    "description": "群聊唤醒关键词",
     "type": "list",
     "default": [],
-    "hint": "群里正文出现这些词就算在叫她，大小写不敏感。"
+    "hint": "群聊消息正文命中任一关键词即触发唤醒，大小写不敏感。@机器人与私聊始终触发唤醒，无需配置。"
   },
   "contacts_map": {
-    "description": "会话与联系人备注",
+    "description": "联系人备注",
     "type": "list",
     "default": [],
-    "hint": "一行一条，写成 QQ号或群号 = 名字。优先于 AstrHe 关系本。"
-  },
-  "group_batch_enabled": {
-    "description": "群聊点名攒批",
-    "type": "bool",
-    "default": true,
-    "hint": "群友连发几条时先等一会，凑齐一起叫醒。"
-  },
-  "private_batch_enabled": {
-    "description": "私聊攒批",
-    "type": "bool",
-    "default": true,
-    "hint": "私聊连发几条时先等一会，凑齐一起交给她。"
+    "hint": "每行一条，格式 QQ号或群号 = 显示名。优先级高于 AstrHe 关系本与平台昵称。"
   },
   "group_batch_window_sec": {
-    "description": "攒批等待秒数",
+    "description": "消息合并等待秒数",
     "type": "float",
     "default": 3,
-    "hint": "群聊私聊共用，支持小数。填 0 不等。"
+    "hint": "唤醒类消息到达后等待该时长，等待期内的后续消息合并为一次对话轮。设为 0 禁用合并，每条消息独立处理。群聊与私聊共用。"
   },
   "mention_inline_enabled": {
-    "description": "点名通知内嵌消息",
+    "description": "点名通知附带上下文",
     "type": "bool",
     "default": true,
-    "hint": "通知里直接带叫她的那几句和前后文并标记已读，省一次读群。"
+    "hint": "开启时唤醒通知直接内嵌命中的消息及前后文并标记已读；关闭时仅提示未读数量，由模型按需调用 read_channel 查看。"
   },
-  "mention_inline_limit": {
-    "description": "内嵌最多几条",
-    "type": "int",
-    "default": 20,
-    "hint": "默认 20，最多 100。她说的话也算在内。"
-  },
-  "light_provider_id": {
-    "description": "小模型",
-    "type": "string",
-    "default": "",
-    "_special": "select_provider",
-    "hint": "用来概括群话题和写醒来摘要。建议选便宜的。"
-  },
-  "topic_min_unread": {
-    "description": "概括话题的未读门槛",
-    "type": "int",
-    "default": 5,
-    "hint": "未读攒到这么多条且过冷却时间，后台概括一次。"
-  },
-  "topic_cooldown_sec": {
-    "description": "概括冷却秒数",
-    "type": "int",
-    "default": 180,
-    "hint": "同一个群多久最多概括一次。从上次尝试算起，失败也算。被点名不受限。"
-  },
-  "heartbeat_enabled": {
-    "description": "自己醒来",
-    "type": "bool",
-    "default": true,
-    "hint": "没人说话时按概率醒来，看群、看待办，想说话就说。"
-  },
-  "heartbeat_provider_id": {
-    "description": "醒来用的模型",
-    "type": "string",
-    "default": "",
-    "_special": "select_provider",
-    "hint": "不填跟主脑用同一个。填的模型不存在时回退主脑并打日志。"
-  },
-  "heartbeat_prompt": {
-    "description": "醒来时对她说的话",
-    "type": "text",
-    "default": "[心跳] 已经 {quiet_min} 分钟没人私聊你、也没人在群里叫你了。这是第 {idle_ticks} 次自己醒来。\n\n1. 对一遍待办和规划。规划用 astrhe_read_plan，待办用 astrhe_read_todos。答应过别人的事挑一件现在能做的做，做完用 astrhe_todo_update 记一笔；过时的标成放弃。\n2. 聊天里冒出来的新约定用 astrhe_todo_add 记下，挂到用得上它的会话。计划变了用 astrhe_todo_edit 或 astrhe_plan_edit 改。\n3. 现在做不了的用 astrhe_schedule 定个时间，到点会叫醒你。\n4. 看会话清单，用 read_channel 翻你在意的群和人。有能接的话就用 send_message_to_user 说一句，一次一件事、只发一条，发完就等。\n5. 对方在忙在睡，或者你刚在那边说过话，安静结束这一拍。",
-    "hint": "支持 {quiet_min} 与 {idle_ticks}。留空用内置文案。"
-  },
-  "heartbeat_floor_min": {
-    "description": "最短安静分钟",
-    "type": "int",
-    "default": 5,
-    "hint": "安静不到这么久一定不醒。"
-  },
-  "heartbeat_ceil_min": {
-    "description": "最长安静分钟",
-    "type": "int",
-    "default": 60,
-    "hint": "安静到这么久一定醒一次。"
-  },
-  "heartbeat_target_mean_min": {
-    "description": "平均间隔分钟",
-    "type": "int",
-    "default": 15,
-    "hint": "要在上下限之间。改了会重算概率曲线。"
-  },
-  "heartbeat_quiet_enabled": {
-    "description": "夜里不醒",
+  "intercept_direct_reply": {
+    "description": "工具回复后抑制直出文本",
     "type": "bool",
     "default": false,
-    "hint": "时段内不抽签、不唤醒。进出时段会把计时归零。"
+    "hint": "本轮已通过 send_message_to_user 向当前会话发送过消息时，丢弃模型末尾直接输出的文本，避免重复发送。模型单独输出 [SILENT] 的静默行为不受影响。"
+  },
+  "heartbeat_enabled": {
+    "description": "自主唤醒",
+    "type": "bool",
+    "default": true,
+    "hint": "空闲时按概率周期性触发主动对话轮：检索待办、浏览群聊并可发送消息。关闭后仅响应 @、关键词与私聊。"
+  },
+  "heartbeat_provider_id": {
+    "description": "自主唤醒模型",
+    "type": "string",
+    "default": "",
+    "_special": "select_provider",
+    "hint": "唤醒对话轮与唤醒小结共用的模型。留空时使用主会话默认模型；指定的模型不存在时回退默认模型并记录日志。",
+    "condition": {
+      "heartbeat_enabled": true
+    }
+  },
+  "heartbeat_prompt": {
+    "description": "自主唤醒提示词",
+    "type": "text",
+    "default": "[自主唤醒] 距上次有人私聊或在群中唤醒你已 {quiet_min} 分钟，本轮空闲期内第 {idle_ticks} 次唤醒。\n\n1. 核对待办与规划：规划用 astrhe_read_plan，待办用 astrhe_read_todos。选取一件当前可完成的事项执行，完成后用 astrhe_todo_update 记录；已失效的条目标记为放弃。\n2. 对话中出现的新约定用 astrhe_todo_add 记录并关联对应会话；计划变更用 astrhe_todo_edit 或 astrhe_plan_edit 更新。\n3. 暂时无法处理的事项用 astrhe_schedule 设定提醒时间，到期将自动唤醒。\n4. 查看会话清单，用 read_channel 检查关注的会话。有可参与的话题时用 send_message_to_user 发送一条消息，每次仅处理一件事，发送后等待。\n5. 无可执行事项，或目标联系人近期已交互过时，不发送任何消息，静默结束本轮。",
+    "hint": "唤醒时注入的用户指令。支持占位符 {quiet_min}（空闲分钟数）与 {idle_ticks}（本轮空闲期内唤醒次数）。留空使用内置默认。",
+    "condition": {
+      "heartbeat_enabled": true
+    }
+  },
+  "heartbeat_quiet_enabled": {
+    "description": "夜间免打扰",
+    "type": "bool",
+    "default": false,
+    "hint": "指定时段内暂停自主唤醒抽签。进入与退出时段时空闲计时归零。"
   },
   "heartbeat_quiet_start_hour": {
-    "description": "静默开始整点",
+    "description": "免打扰开始时刻",
     "type": "int",
     "default": 22,
-    "hint": "按 AstrBot 时区算。"
+    "hint": "0-23 的整点值，按 AstrBot 时区计算。开始晚于结束表示跨零点窗口；两者相等视为不启用。",
+    "condition": {
+      "heartbeat_quiet_enabled": true
+    }
   },
   "heartbeat_quiet_end_hour": {
-    "description": "静默结束整点",
+    "description": "免打扰结束时刻",
     "type": "int",
     "default": 8,
-    "hint": "开始大于结束表示跨夜。两值相同等于不启用。"
+    "hint": "0-23 的整点值，按 AstrBot 时区计算。",
+    "condition": {
+      "heartbeat_quiet_enabled": true
+    }
+  },
+  "topic_summary_enabled": {
+    "description": "话题概括",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后按分段调用小模型生成群聊话题摘要，用于会话清单、点名通知与 read_channel 分段目录。关闭后不产生对应模型调用，读群仅返回原文；已生成的摘要与进度保留，重新开启后继续。"
+  },
+  "light_provider_id": {
+    "description": "话题概括模型",
+    "type": "string",
+    "default": "",
+    "_special": "select_provider",
+    "hint": "用于群聊话题摘要与分段总结，建议选择低成本模型。留空时使用会话默认模型。",
+    "condition": {
+      "topic_summary_enabled": true
+    }
+  },
+  "read_channel_image_enabled": {
+    "description": "群聊识图",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后 read_channel 与话题概括自动为图片生成文字描述，优先复用缓存。提示词与首选模型跟随 AstrBot 核心的图片转述配置。"
+  },
+  "vision_provider_ids": {
+    "description": "识图兜底模型",
+    "type": "list",
+    "default": [],
+    "_special": "select_providers",
+    "hint": "AstrBot 未配置图片转述模型时按顺序依次尝试，留空使用会话默认模型。",
+    "condition": {
+      "read_channel_image_enabled": true
+    }
   },
   "image_keep_days": {
     "description": "图片留底天数",
     "type": "int",
     "default": 3,
-    "hint": "缩小后存在插件目录，过期删除。动图只存第一帧。0 不存。"
-  },
-  "read_channel_image_enabled": {
-    "description": "读群时给图配描述",
-    "type": "bool",
-    "default": true,
-    "hint": "只识别本次展示的留底图，先查缓存。带表情名的小表情跳过。"
-  },
-  "read_channel_image_max": {
-    "description": "每次最多新识别几张",
-    "type": "int",
-    "default": 6,
-    "hint": "缓存命中的不占名额。0 只用缓存。"
-  },
-  "read_channel_image_wait_sec": {
-    "description": "识图最多等几秒",
-    "type": "int",
-    "default": 8,
-    "hint": "没等到的标「还没看清」，后台继续识别。"
-  },
-  "image_brief_max_chars": {
-    "description": "读群时图片描述截断字数",
-    "type": "int",
-    "default": 80,
-    "hint": "read_channel 展示原始消息行时按这个字数裁描述，超长补省略号。完整描述仍在，用 read_image 看。0 不裁。"
-  },
-  "read_image_max_chars": {
-    "description": "read_image 回答字数上限",
-    "type": "int",
-    "default": 500,
-    "hint": "不带问题直接给账本里存下的完整描述，带问题只回答。0 不裁。"
-  },
-  "vision_provider_ids": {
-    "description": "识图模型降级链",
-    "type": "list",
-    "default": [],
-    "_special": "select_providers",
-    "hint": "优先用 AstrBot 面板里的识图模型；那没配才按这个顺序试。留空用会话默认模型。"
-  },
-  "vision_timeout_sec": {
-    "description": "单次识图超时秒数",
-    "type": "int",
-    "default": 60,
-    "hint": "超时算失败，重试或换下一个模型。带思考的视觉模型很慢，设太小会白跑。"
-  },
-  "topic_image_caption_enabled": {
-    "description": "概括话题时给图配描述",
-    "type": "bool",
-    "default": true,
-    "hint": "提示词跟 AstrBot 主对话共用一份，不写回账本。"
-  },
-  "vision_cache_ttl_days": {
-    "description": "描述缓存保留天数",
-    "type": "int",
-    "default": 30,
-    "hint": "按最后使用时间算，只清插件自己的缓存。0 不过期。"
-  },
-  "intercept_direct_reply": {
-    "description": "用工具回过就收起末尾文字",
-    "type": "bool",
-    "default": false,
-    "hint": "本轮已发到叫醒她的会话，后面直接写的字不再发。单写 [SILENT] 始终静默。"
+    "hint": "入站图片缩放存档的天数，供 read_image 工具回看。0 表示不存档。过期文件由后台任务定时清理，不依赖自主唤醒开关。"
   },
   "topic_options": {
-    "description": "话题概括",
+    "description": "话题概括参数",
     "type": "object",
+    "condition": {
+      "topic_summary_enabled": true
+    },
     "items": {
-      "max_chars": {
-        "description": "话题字数上限",
-        "type": "int",
-        "default": 24,
-        "hint": "信箱里「在聊」那一句的上限。"
-      },
-      "line_max_chars": {
-        "description": "每条消息截多少字",
-        "type": "int",
-        "default": 120,
-        "hint": "太长的部分截掉。"
-      },
-      "timeout_sec": {
-        "description": "小模型超时秒数",
-        "type": "int",
-        "default": 10,
-        "hint": "概括话题和写醒来摘要共用。"
-      },
-      "segment_rows_per_page": {
-        "description": "目录一次列几段",
-        "type": "int",
-        "default": 10,
-        "hint": "点开一个群时最先看到这么多段。越多越占上下文。"
-      },
-      "segment_msg_count": {
-        "description": "每几条消息切一段",
-        "type": "int",
-        "default": 25,
-        "hint": "每这么多条跑一次总结。改小切得更细，小模型调用更频繁。"
-      },
-      "segment_backfill_max": {
-        "description": "一次最多补几段",
+      "min_unread": {
+        "description": "触发阈值（未读条数）",
         "type": "int",
         "default": 5,
-        "hint": "积压时每次触发最多补这么多段。"
+        "hint": "群未读消息达到该数量且冷却结束时触发一次概括。"
+      },
+      "cooldown_sec": {
+        "description": "触发冷却秒数",
+        "type": "int",
+        "default": 180,
+        "hint": "同一会话两次概括之间的最短间隔，失败的尝试同样计入。被点名的强制触发不受此限制。"
+      },
+      "max_chars": {
+        "description": "话题摘要字数上限",
+        "type": "int",
+        "default": 24,
+        "hint": "会话清单与点名通知中单条话题摘要的字数上限。"
+      },
+      "line_max_chars": {
+        "description": "单条消息截断字数",
+        "type": "int",
+        "default": 120,
+        "hint": "送入概括模型前单条消息保留的最大字数。"
+      },
+      "timeout_sec": {
+        "description": "模型请求超时秒数",
+        "type": "int",
+        "default": 10,
+        "hint": "单次概括请求的超时时间。"
+      },
+      "segment_msg_count": {
+        "description": "分段消息条数",
+        "type": "int",
+        "default": 25,
+        "hint": "每多少条消息切分为一个分段并生成一份摘要。调小则分段更细、模型调用更频繁。"
+      },
+      "segment_rows_per_page": {
+        "description": "目录每页分段数",
+        "type": "int",
+        "default": 10,
+        "hint": "read_channel 分段目录单次展示的分段数量。"
+      },
+      "segment_backfill_max": {
+        "description": "单次补充分段上限",
+        "type": "int",
+        "default": 5,
+        "hint": "消息积压时单次触发最多补齐的分段数量。"
       }
     }
   },
-  "wake_options": {
-    "description": "自己醒来",
+  "heartbeat_options": {
+    "description": "自主唤醒参数",
     "type": "object",
+    "condition": {
+      "heartbeat_enabled": true
+    },
     "items": {
-      "summary_max_chars": {
-        "description": "醒来摘要字数上限",
+      "floor_min": {
+        "description": "最短空闲分钟",
+        "type": "int",
+        "default": 5,
+        "hint": "空闲不足该时长时不触发唤醒。需小于最长空闲分钟。"
+      },
+      "ceil_min": {
+        "description": "最长空闲分钟",
         "type": "int",
         "default": 60,
-        "hint": "用过工具才写。写失败不写。"
+        "hint": "空闲达到该时长时必定触发一次唤醒。"
+      },
+      "target_mean_min": {
+        "description": "平均唤醒间隔分钟",
+        "type": "int",
+        "default": 15,
+        "hint": "唤醒概率曲线的目标均值，需位于最短与最长空闲分钟之间，超出时自动修正。修改后自动重算概率分布。"
       },
       "tick_sec": {
         "description": "抽签间隔秒数",
         "type": "int",
         "default": 60,
-        "hint": "每隔多久决定一次要不要醒。改了会重算概率，平均间隔不变。"
+        "hint": "空闲判定与概率抽签的周期。修改后重算概率分布，平均间隔保持不变。"
       },
       "max_steps": {
-        "description": "一次醒来最多几步",
+        "description": "单轮最大工具步数",
         "type": "int",
         "default": 32,
-        "hint": "一次回复算一步，一步可能调多个工具。"
+        "hint": "单次唤醒对话轮的工具调用步数上限，防止失控循环。"
+      },
+      "summary_max_chars": {
+        "description": "唤醒小结字数上限",
+        "type": "int",
+        "default": 60,
+        "hint": "唤醒结束后写入共享记忆的小结字数上限。仅在唤醒轮实际调用过工具时生成。"
+      }
+    }
+  },
+  "vision_options": {
+    "description": "识图参数",
+    "type": "object",
+    "condition": {
+      "read_channel_image_enabled": true
+    },
+    "items": {
+      "image_max": {
+        "description": "单次新识别图片上限",
+        "type": "int",
+        "default": 6,
+        "hint": "单次读群或概括最多新发起的识图请求数，缓存命中不占名额。"
+      },
+      "wait_sec": {
+        "description": "等待识图秒数",
+        "type": "int",
+        "default": 8,
+        "hint": "读群时等待识图完成的时长，超时的请求转入后台继续，下次读取时可见。"
+      },
+      "brief_max_chars": {
+        "description": "消息行描述截断字数",
+        "type": "int",
+        "default": 80,
+        "hint": "read_channel 消息行内图片描述的截断字数，完整描述仍可通过 read_image 查看。"
+      },
+      "read_max_chars": {
+        "description": "read_image 返回字数上限",
+        "type": "int",
+        "default": 500,
+        "hint": "read_image 工具返回内容的字数上限。"
+      },
+      "timeout_sec": {
+        "description": "单次识图请求超时秒数",
+        "type": "int",
+        "default": 60,
+        "hint": "单个识图请求的超时时间。带推理的视觉模型响应较慢，设置过小会导致请求白白失败。"
+      },
+      "cache_ttl_days": {
+        "description": "描述缓存保留天数",
+        "type": "int",
+        "default": 30,
+        "hint": "图片描述缓存按最后使用时间清理，0 表示永不过期。"
       }
     }
   },
   "display_options": {
-    "description": "清单显示",
+    "description": "显示参数",
     "type": "object",
     "items": {
       "session_list_max": {
-        "description": "清单最多列几个",
+        "description": "会话清单最大条数",
         "type": "int",
         "default": 8,
-        "hint": "会话清单和 /astrmia status 共用。"
+        "hint": "注入上下文的会话清单最多展示的会话数量，/astrmia status 共用。"
       },
       "quote_preview_chars": {
         "description": "引用预览字数",
         "type": "int",
         "default": 40,
-        "hint": "群消息引用别人时，记进信箱的引用部分留多少字。"
+        "hint": "消息引用回复时，记入信箱的被引用文字保留字数。"
+      },
+      "inline_limit": {
+        "description": "点名通知内嵌消息上限",
+        "type": "int",
+        "default": 20,
+        "hint": "点名通知附带上下文时最多包含的消息条数。"
       }
     }
   }

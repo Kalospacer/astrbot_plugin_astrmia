@@ -1,4 +1,4 @@
-"""唤醒结束后的小结：交给小模型压成一句，追加进主脑历史。"""
+"""唤醒结束后的小结：交给心跳模型压成一句，追加进主脑历史。"""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import re
 import uuid
 from typing import Any
 
-# 单条工具返回交给小结模型时保留的字数，防止 read_channel 长结果撑爆轻量模型输入
+# 单条工具返回交给小结模型时保留的字数，防止 read_channel 长结果撑爆小结模型输入
 TOOL_RESULT_PREVIEW_CHARS = 800
 
 
@@ -53,9 +53,9 @@ def build_wake_summary_prompt(material: str, max_chars: int) -> str:
     """构造唤醒小结提示词。"""
     return "\n".join(
         [
-            "下面是你刚才自己醒来时做的事：用了哪些工具，工具回了什么。",
-            f"用「我」写一句小结，{max_chars} 字以内：看了哪里，看到什么要紧事，给谁发了什么，还有什么没做完。",
-            "只按工具回的结果写。没发成功的别写成发出去了，没看到的别编，没有新消息就如实写没有。",
+            "以下是本次自主唤醒的操作记录：调用的工具及返回结果。",
+            f"以「我」为主语写一句小结，{max_chars} 字以内：查看了哪些会话、关键信息、向谁发送了什么、未完成事项。",
+            "仅依据工具返回结果撰写：发送失败不得记为已发送，未获取的信息不得臆造，无新消息时如实说明。",
             "",
             "=== 记录开始 ===",
             material,
@@ -75,7 +75,7 @@ def parse_wake_summary(raw: str, max_chars: int) -> str | None:
 async def summarize_wake(
     provider: Any, material: str, *, max_chars: int, timeout_sec: int
 ) -> str | None:
-    """调用轻量模型生成唤醒小结；超时或异常向上抛出，由调用方记日志。"""
+    """调用指定模型生成唤醒小结；超时或异常向上抛出，由调用方记日志。"""
     resp = await asyncio.wait_for(
         provider.text_chat(
             prompt=build_wake_summary_prompt(material, max_chars),
