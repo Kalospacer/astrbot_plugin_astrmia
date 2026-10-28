@@ -67,6 +67,22 @@ except Exception:  # pragma: no cover - 单元测试环境兼容
 PLUGIN_NAME = "astrbot_plugin_astrmia"
 SEND_OK_PREFIX = "Message sent to session"
 
+# 内部日志前缀：心跳小结、定时任务总结、后台任务总结只该进对话历史与日志，
+# 绝不能当作聊天消息外发。心跳轮里模型读到历史中的这些条目后照抄群发过一次，
+# 因此在 Context.send_message 上加内容级闸门做兜底。
+INTERNAL_LOG_PREFIXES = (
+    "[IRMIA Wake]",
+    "[管家任务通知]",
+    "[CronJob]",
+    "[BackgroundTask]",
+)
+
+
+def is_internal_log_text(text: str) -> bool:
+    """判断文本是否以内部日志前缀开头。"""
+    return bool(text) and text.strip().startswith(INTERNAL_LOG_PREFIXES)
+
+
 # AstrBot 本地运行时在工具提示后追加的工作目录说明；路径随源会话变化，挪到用户消息尾部以稳定 system 前缀
 WORKSPACE_NOTE_RE = re.compile(
     r"\nCurrent workspace: `[^`]*`\. .*?do not assume this behavior for other tools\.\n",
@@ -907,8 +923,22 @@ class IrmiaRuntime:
         setattr(self.context, "_irmia_send_patched", True)
 
         async def patched_send_message(session, message_chain):
+            ev = self._current_chat_event.get()
+            if message_chain is not None and ev is not None and not is_internal_silent_event(ev):
+                blocked = self._blocked_internal_log(ev, message_chain)
+                if blocked:
+                    # 抛错而不是假装成功：假装成功会让上游把这段日志记成"已发送"，
+                    # 留下一份假的送达记录；抛错能如实告诉模型这条路走不通。
+                    self.logger.warning(
+                        f"[IRMIA 拦截内部日志外发] target={session} 文本={blocked[:80]}"
+                    )
+                    raise RuntimeError(
+                        "internal-log blocked: 以 [IRMIA Wake]/[管家任务通知]/"
+                        "[CronJob]/[BackgroundTask] 开头的工作小结不允许外发，"
+                        "它只属于对话历史与日志。若确实要和人说话，请换成正常的聊天内容；"
+                        "没事就输出 [SILENT] 结束本轮。"
+                    )
             if self.cfg().enabled and self.cfg().intercept_direct_reply:
-                ev = self._current_chat_event.get()
                 if (
                     ev is not None
                     and not is_internal_silent_event(ev)
@@ -932,6 +962,42 @@ class IrmiaRuntime:
             return await original(session, message_chain)
 
         self.context.send_message = patched_send_message
+
+    def _blocked_internal_log(self, event: Any, message_chain: Any) -> str:
+        """自主唤醒 / 定时任务轮里命中内部日志前缀时，返回被拦文本，否则空串。
+
+        心跳小结（`[IRMIA Wake]`）、女仆通知（`[管家任务通知]`）、定时任务
+        总结（`[CronJob]`）、后台任务总结（`[BackgroundTask]`）会被写回主脑
+        对话历史；模型读到这些条目后可能原样调 `send_message_to_user` 发出去，
+        等于把自己的工作日志当聊天消息推给用户。这类文本只该留在历史与日志里。
+        """
+        try:
+            if not self.cfg().enabled:
+                return ""
+            try:
+                text = str(message_chain.get_plain_text() or "").strip()
+            except Exception:
+                return ""
+            if not is_internal_log_text(text):
+                return ""
+            if not self._is_autonomous_event(event):
+                return ""
+            return text
+        except Exception as exc:  # noqa: BLE001 - 闸门自身出错不能连累正常发送
+            self.logger.debug(f"[IRMIA] 内部日志闸门异常: {exc!r}")
+            return ""
+
+    @staticmethod
+    def _is_autonomous_event(event: Any) -> bool:
+        """判断是否是自主唤醒 / 定时任务这类非用户触发的轮次。"""
+        if event is None:
+            return False
+        if event.__class__.__name__ in {"HeartbeatWakeEvent", "CronMessageEvent"}:
+            return True
+        try:
+            return bool(event.get_extra("irmia_wake"))
+        except Exception:
+            return False
 
     def _uninstall_send_message_patch(self) -> None:
         if self.context is not None and getattr(self.context, "_irmia_send_patched", False):
