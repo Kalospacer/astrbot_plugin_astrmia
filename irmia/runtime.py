@@ -1063,16 +1063,14 @@ class IrmiaRuntime:
         except Exception:
             plain_text = ""
 
-        # 若尚未经过 on_llm_response（显式设为了 False），说明是工具循环中间步骤的过渡话，直接收起
+        # 工具调用中间步的文本照常发给用户；装饰阶段标记仍留到收尾步再置位，
+        # 否则 intercept_direct_reply 的暂存回流会提前失效。
         is_final = (
             event.get_extra("irmia_final_llm_resp")
             if hasattr(event, "get_extra")
             else None
         )
         if is_final is False:
-            if plain_text:
-                self.logger.info(f"[IRMIA 收起工具调用过渡文字] {plain_text}")
-            result.chain = []
             return
 
         if hasattr(event, "set_extra"):
