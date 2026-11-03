@@ -718,3 +718,183 @@ def test_batch_order_survives_slow_image_keep(tmp_path: Path, monkeypatch) -> No
             await rt.terminate()
 
     asyncio.run(_run())
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "text_parts, silent",
+    [
+        (["[SILENT]"], True),
+        (["不参与讨论。[SILENT]"], True),
+        (["[SILENT]后面的说明也不该发送"], True),
+        (["前面的说明\n[SILENT]\n后面的说明"], True),
+        (["前面的说明", "[SILENT]", "后面的说明"], True),
+        (["正常回复"], False),
+        (["示例 [silent] 保持原样"], False),
+    ],
+)
+async def test_silent_marker_discards_entire_reply(tmp_path, text_parts, silent):
+    """最终直出包含标记时整链丢弃，分段下游不能收到正文或图片。"""
+    from astrbot.core.message.components import Image, Plain
+    from astrbot.core.message.message_event_result import (
+        MessageEventResult,
+        ResultContentType,
+    )
+
+    umo = "aiocqhttp:GroupMessage:777"
+    ctx = FakeContext()
+    rt = IrmiaRuntime(
+        ctx,
+        {"heartbeat_enabled": False, "intercept_direct_reply": False},
+        logging.getLogger("test"),
+        data_dir=tmp_path,
+    )
+    await rt.initialize()
+    try:
+        event = FakeEvent(umo, "触发消息")
+        await rt.on_llm_response(event)
+        event._result = MessageEventResult().set_result_content_type(
+            ResultContentType.LLM_RESULT
+        )
+        original = [
+            *(Plain(text) for text in text_parts),
+            Image.fromURL("https://example.invalid/test.png"),
+        ]
+        event._result.chain = original.copy()
+
+        await rt.on_decorating_result(event)
+        if event._result.chain:
+            await ctx.send_message(umo, event._result)
+        await rt.on_after_message_sent(event)
+
+        if silent:
+            assert event._result.chain == []
+            assert ctx.sent_messages == []
+            assert not any(row.is_bot for row in rt.store.fetch_messages(umo))
+        else:
+            assert event._result.chain == original
+            assert len(ctx.sent_messages) == 1
+    finally:
+        await rt.terminate()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("intercept", [False, True])
+async def test_silent_final_preserves_tool_reply(tmp_path, intercept):
+    """末尾直出选择沉默，不撤销独立工具消息，也不吞掉暂存回流。"""
+    from astrbot.core.message.components import Plain
+    from astrbot.core.message.message_event_result import (
+        MessageChain,
+        MessageEventResult,
+        ResultContentType,
+    )
+
+    umo = "aiocqhttp:FriendMessage:114514"
+    ctx = FakeContext()
+    rt = IrmiaRuntime(
+        ctx,
+        {
+            "master_umo": umo,
+            "heartbeat_enabled": False,
+            "intercept_direct_reply": intercept,
+        },
+        logging.getLogger("test"),
+        data_dir=tmp_path,
+    )
+    await rt.initialize()
+    try:
+        event = FakeEvent(umo, "问题", private=True)
+        await rt.on_llm_request(event, FakeReq(prompt="问题"))
+        tool_chain = MessageChain(chain=[Plain("独立的正式工具回复")])
+        await ctx.send_message(umo, tool_chain)
+        event.set_extra("irmia_sent_current_session", True)
+        await rt.on_llm_response(event)
+        event._result = (
+            MessageEventResult()
+            .message("末尾解释不应发送。[SILENT]")
+            .set_result_content_type(ResultContentType.LLM_RESULT)
+        )
+
+        await rt.on_decorating_result(event)
+        if event._result.chain:
+            await ctx.send_message(umo, event._result)
+        await rt._flush_unconsumed_buffered_chain(event)
+
+        assert len(ctx.sent_messages) == 1
+        assert ctx.sent_messages[0][1].get_plain_text() == "独立的正式工具回复"
+        assert not event.get_extra("irmia_buffered_tool_chain")
+    finally:
+        await rt.terminate()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_activity", [False, True])
+async def test_wake_final_silent_text_is_discarded(
+    tmp_path, monkeypatch, tool_activity
+):
+    """自主唤醒的最终文本带标记时不返回正文，也不传入工具活动小结。"""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, Mock
+
+    from irmia.heartbeat import HeartbeatFiring
+
+    master = "aiocqhttp:FriendMessage:114514"
+    ctx = FakeContext()
+    ctx.get_llm_tool_manager = Mock(
+        return_value=SimpleNamespace(get_builtin_tool=Mock(return_value=None))
+    )
+    rt = IrmiaRuntime(
+        ctx,
+        {"master_umo": master, "heartbeat_enabled": False},
+        logging.getLogger("test"),
+        data_dir=tmp_path,
+    )
+    await rt.initialize()
+    try:
+        runner = SimpleNamespace(
+            step_until_done=Mock(return_value=AsyncMock()),
+            get_final_llm_resp=Mock(
+                return_value=SimpleNamespace(completion_text="不该外发的说明。[SILENT]")
+            ),
+        )
+        monkeypatch.setattr(
+            "astrbot.core.astr_main_agent.build_main_agent",
+            AsyncMock(
+                return_value=SimpleNamespace(agent_runner=runner, reset_coro=None)
+            ),
+        )
+        monkeypatch.setattr(
+            "astrbot.core.pipeline.context.call_event_hook", AsyncMock()
+        )
+        monkeypatch.setattr("astrbot.core.agent.tool.ToolSet.add_tool", Mock())
+        monkeypatch.setattr(
+            rt,
+            "_bind_master_conversation",
+            AsyncMock(side_effect=None),
+        )
+        summary = AsyncMock()
+        monkeypatch.setattr(rt, "_append_wake_summary", summary)
+        monkeypatch.setattr(
+            "astrbot.core.provider.entities.ProviderRequest",
+            Mock(
+                return_value=SimpleNamespace(
+                    tool_calls_result=["tool"] if tool_activity else []
+                )
+            ),
+        )
+
+        result = await rt._run_wake_turn(
+            master,
+            HeartbeatFiring(
+                quiet_seconds=60, probability=1, roll=0, idle_ticks=1, alpha=1
+            ),
+        )
+
+        assert "不该外发" not in result
+        assert "[SILENT]" not in result
+        if tool_activity:
+            summary.assert_awaited_once()
+            assert summary.await_args.args[4] == ""
+        else:
+            summary.assert_not_awaited()
+    finally:
+        await rt.terminate()

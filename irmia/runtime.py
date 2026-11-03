@@ -1095,7 +1095,7 @@ class IrmiaRuntime:
             result.chain = []
             return
 
-        if plain_text == "[SILENT]":
+        if "[SILENT]" in plain_text:
             self.logger.info(
                 f"[IRMIA 沉默] 主脑选择保持沉默 ({getattr(event, 'unified_msg_origin', '')})"
             )
@@ -1367,7 +1367,7 @@ class IrmiaRuntime:
             if llm_resp and llm_resp.completion_text
             else ""
         )
-        if reply_text == "[SILENT]":
+        if "[SILENT]" in reply_text:
             reply_text = ""
 
         # 空拍（没调过工具）不调小结模型、不往主脑历史写任何东西
