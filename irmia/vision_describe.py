@@ -7,8 +7,8 @@
   所以本模块绝不解析描述的固定结构（没有 `# Full Text Representation` 这类假设）。
 - 模型来源优先用 AstrBot 的 `default_image_caption_provider_id`，没配才退回插件
   自己的 `vision_provider_ids` 与会话默认模型。
-- 缓存里存的是完整描述，不做截断；要截多少字由展示侧按 `image_brief_max_chars`
-  现裁，这样 read_image 拿到的永远是全文。
+- 缓存里存的是完整描述，不做截断；展示侧按 `image_brief_max_chars` 现裁，
+  `read_image` 返回时按 `read_image_max_chars` 裁切（设为 0 表示不限制、返回全文）。
 - 描述里可能出现的方括号被替换成全角，避免和 `[图片: ...]` 占位符互相吞掉。
 """
 
@@ -246,40 +246,61 @@ class Captioner:
             [row.platform_message_id for row in eligible],
         )
         captions: dict[int, list[str | None]] = {}
-        pending: list[tuple[ChannelMessageRow, KeptImage]] = []
+        pending: list[tuple[ChannelMessageRow, KeptImage, int]] = []
         for row in eligible:
             kept_images = kept_by_message.get(row.platform_message_id, [])
             if not kept_images:
                 continue
-            slots: list[str | None] = [""] * len(BARE_IMAGE_RE.findall(row.text))
+
+            bare_slot_by_idx: dict[int, int] = {}
+            bare_pos = 0
+            for img_idx, match in enumerate(ANY_IMAGE_RE.finditer(row.text)):
+                if BARE_IMAGE_RE.fullmatch(match.group(0)):
+                    bare_slot_by_idx[img_idx] = bare_pos
+                    bare_pos += 1
+            if not bare_slot_by_idx:
+                continue
+
+            slots: list[str | None] = [""] * bare_pos
             captions[row.id] = slots
             for kept in kept_images:
-                if kept.idx >= len(slots):
+                slot_idx = bare_slot_by_idx.get(kept.idx)
+                if slot_idx is None:
                     continue
                 hit = await asyncio.to_thread(
-                    self.vstore.find_desc, kept.sha256, KIND_FULL, "", kept.dhash
+                    self.vstore.find_desc, kept.sha256, KIND_FULL, ""
                 )
-                slots[kept.idx] = hit or None
+                slots[slot_idx] = hit or None
                 if not hit:
-                    pending.append((row, kept))
+                    pending.append((row, kept, slot_idx))
+
         tasks: dict[asyncio.Task[str], list[tuple[int, int]]] = {}
         pending.sort(key=lambda item: (item[0].id, item[1].idx), reverse=True)
-        for row, kept in pending[:max_new]:
+        for row, kept, slot_idx in pending[:max_new]:
             task = self._task_for(row.umo, kept)
-            tasks.setdefault(task, []).append((row.id, kept.idx))
+            tasks.setdefault(task, []).append((row.id, slot_idx))
+
         if tasks:
             done, _ = await asyncio.wait(tasks, timeout=wait_sec)
             for task in done:
-                text = task.result()
-                for row_id, idx in tasks[task]:
-                    captions[row_id][idx] = text or None
+                if task.cancelled():
+                    text = ""
+                else:
+                    exc = task.exception()
+                    if exc is not None:
+                        self.logger.debug(f"[IRMIA] 识图后台任务异常: {exc!r}")
+                        text = ""
+                    else:
+                        text = task.result()
+                for row_id, slot_idx in tasks[task]:
+                    captions[row_id][slot_idx] = text or None
         return captions
 
     async def describe_for_tool(self, umo: str, kept: KeptImage, question: str) -> str:
-        """不带问题给完整描述，带问题针对问题回答；命中缓存直接返回。
+        """不带问题给完整描述，带问题针对问题回答；命中缓存直接返回并按上限裁切。
 
         这里只要完整描述，不接受旧的一句话简述凑数：read_image 存在的意义就是把
-        细节看全。缓存里都没有才去识一次。
+        细节看全。缓存里存完整原文，返回时按 read_image_max_chars 裁切（0 表示不限制）。
         """
         cfg = self.cfg_getter()
         kind = KIND_QA if question else KIND_FULL
@@ -292,9 +313,9 @@ class Captioner:
             False,
         )
         if hit:
-            return truncate_caption(hit, cfg.read_image_max_chars) if question else hit
+            return truncate_caption(hit, cfg.read_image_max_chars)
         text = await asyncio.shield(self._task_for(umo, kept, question))
-        return truncate_caption(text, cfg.read_image_max_chars) if question else text
+        return truncate_caption(text, cfg.read_image_max_chars)
 
 
 def render_with_captions(

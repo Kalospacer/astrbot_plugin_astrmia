@@ -361,3 +361,212 @@ def test_read_image_uses_full_caption_for_selected_image(
             await store.close()
 
     asyncio.run(_run())
+
+
+def test_vision_zero_config_bounds_and_cleanup_never_expires(tmp_path: Path) -> None:
+    """cache_ttl_days 与 read_max_chars 允许填 0，且 ttl=0 时清理不删旧描述。"""
+    import time
+
+    from irmia.config import load_irmia_config
+
+    cfg = load_irmia_config(
+        {"vision_options": {"cache_ttl_days": 0, "read_max_chars": 0}}
+    )
+    assert cfg.vision_cache_ttl_days == 0
+    assert cfg.read_image_max_chars == 0
+
+    fallback = load_irmia_config(
+        {"vision_options": {"cache_ttl_days": -1, "read_max_chars": False}}
+    )
+    assert fallback.vision_cache_ttl_days == 30
+    assert fallback.read_image_max_chars == 500
+
+    vstore = VisionStore(tmp_path / "vision.db", tmp_path / "kept")
+    vstore.open()
+    try:
+        vstore.put_desc("sha-old", KIND_FULL, "", "", "model", "很久之前的描述")
+        vstore._conn.execute(
+            "UPDATE image_desc SET last_hit_at=? WHERE sha256=?",
+            (time.time() - 60 * 86400, "sha-old"),
+        )
+        vstore._conn.commit()
+        _, _, removed_desc = vstore.cleanup(keep_days=3, desc_ttl_days=0)
+        assert removed_desc == 0
+        assert vstore.find_desc("sha-old", KIND_FULL) == "很久之前的描述"
+    finally:
+        vstore.close()
+
+
+@pytest.mark.parametrize("question", ["", "图里写了啥"])
+def test_describe_for_tool_respects_read_max_chars(
+    tmp_path: Path, question: str
+) -> None:
+    """read_image 无论有无提问都按 read_max_chars 裁切，设为 0 返回完整原文且不破坏缓存。"""
+    from irmia.config import IrmiaConfig
+    from irmia.vision import KeptImage
+    from irmia.vision_describe import KIND_QA, Captioner
+
+    async def _run() -> None:
+        vstore = VisionStore(tmp_path / "vision.db", tmp_path / "kept")
+        vstore.open()
+        long_text = "图内正文" * 200
+        kind = KIND_QA if question else KIND_FULL
+        vstore.put_desc("sha-long", kind, question, "", "model", long_text)
+        cfg = IrmiaConfig(read_image_max_chars=500)
+        captioner = Captioner(
+            vstore,
+            SimpleNamespace(),
+            lambda: cfg,
+            asyncio.create_task,
+            SimpleNamespace(debug=lambda *_: None),
+        )
+        try:
+            kept = KeptImage(0, "sha-long", "", str(tmp_path / "x.jpg"))
+            clipped = await captioner.describe_for_tool(UMO, kept, question)
+            assert len(clipped) == 500
+            assert clipped.endswith("…")
+
+            cfg.read_image_max_chars = 0
+            full = await captioner.describe_for_tool(UMO, kept, question)
+            assert full == long_text
+            assert vstore.find_desc("sha-long", kind, question, "", False) == long_text
+        finally:
+            vstore.close()
+
+    asyncio.run(_run())
+
+
+def test_caption_rows_handles_task_error_and_cancellation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """后台识图任务抛错或被取消时降级为 None，不中断读群。"""
+    from irmia.config import IrmiaConfig
+    from irmia.store import ChannelMessageRow
+    from irmia.vision_describe import Captioner
+
+    async def _run() -> None:
+        vstore = VisionStore(tmp_path / "vision.db", tmp_path / "kept")
+        vstore.open()
+        vstore.add_kept(UMO, "p-err", 0, "sha-err", "", str(tmp_path / "e.jpg"))
+        vstore.add_kept(UMO, "p-cancel", 0, "sha-cancel", "", str(tmp_path / "c.jpg"))
+        captioner = Captioner(
+            vstore,
+            SimpleNamespace(),
+            IrmiaConfig,
+            asyncio.create_task,
+            SimpleNamespace(debug=lambda *_: None),
+        )
+
+        async def _broken(umo, kept, question):
+            if kept.sha256 == "sha-err":
+                raise RuntimeError("disk full")
+            raise asyncio.CancelledError()
+
+        monkeypatch.setattr(captioner, "_describe", _broken)
+        rows = [
+            ChannelMessageRow(
+                id=1,
+                umo=UMO,
+                platform_id="aiocqhttp",
+                message_type="GroupMessage",
+                session_id="606",
+                platform_message_id="p-err",
+                sender_id="1",
+                sender_name="甲",
+                sender_card="",
+                text="[图片]",
+                ts=1700000001.0,
+                is_bot=False,
+            ),
+            ChannelMessageRow(
+                id=2,
+                umo=UMO,
+                platform_id="aiocqhttp",
+                message_type="GroupMessage",
+                session_id="606",
+                platform_message_id="p-cancel",
+                sender_id="2",
+                sender_name="乙",
+                sender_card="",
+                text="[图片]",
+                ts=1700000002.0,
+                is_bot=False,
+            ),
+        ]
+        try:
+            got = await captioner.caption_rows(rows, wait_sec=2, max_new=6)
+            assert got == {1: [None], 2: [None]}
+        finally:
+            vstore.close()
+
+    asyncio.run(_run())
+
+
+def test_caption_rows_aligns_mixed_described_and_bare_images(
+    tmp_path: Path,
+) -> None:
+    """同一消息混有已描述占位符和裸占位符时，按全图下标精准对应裸槽位。"""
+    from irmia.config import IrmiaConfig
+    from irmia.store import ChannelMessageRow
+    from irmia.vision_describe import Captioner
+
+    async def _run() -> None:
+        vstore = VisionStore(tmp_path / "vision.db", tmp_path / "kept")
+        vstore.open()
+        vstore.add_kept(UMO, "p-mix", 0, "sha-0", "", str(tmp_path / "0.jpg"))
+        vstore.add_kept(UMO, "p-mix", 1, "sha-1", "", str(tmp_path / "1.jpg"))
+        vstore.put_desc("sha-0", KIND_FULL, "", "", "model", "第一张缓存不应错贴")
+        vstore.put_desc("sha-1", KIND_FULL, "", "", "model", "第二张橘猫")
+        captioner = Captioner(
+            vstore,
+            SimpleNamespace(),
+            IrmiaConfig,
+            asyncio.create_task,
+            SimpleNamespace(debug=lambda *_: None),
+        )
+        row = ChannelMessageRow(
+            id=10,
+            umo=UMO,
+            platform_id="aiocqhttp",
+            message_type="GroupMessage",
+            session_id="606",
+            platform_message_id="p-mix",
+            sender_id="1",
+            sender_name="甲",
+            sender_card="",
+            text="[图片: 第一张已有描述] [图片]",
+            ts=1700000010.0,
+            is_bot=False,
+        )
+        try:
+            captions = await captioner.caption_rows([row], wait_sec=2, max_new=6)
+            assert captions == {10: ["第二张橘猫"]}
+            rendered = render_with_captions(row.text, captions[10], 80)
+            assert rendered == "[图片: 第一张已有描述] [图片: 第二张橘猫]"
+        finally:
+            vstore.close()
+
+    asyncio.run(_run())
+
+
+def test_make_kept_jpeg_skips_redecode_on_duplicate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """重复留底同一张图时直接复用已存 JPEG，不再二次解码。"""
+    from PIL import Image
+
+    from irmia.vision import make_kept_jpeg
+
+    src = tmp_path / "src.png"
+    Image.new("RGB", (32, 32), color="red").save(src, "PNG")
+    keep_root = tmp_path / "kept"
+
+    sha1, dhash1, path1 = make_kept_jpeg(str(src), keep_root)
+    assert sha1 and dhash1 == "" and Path(path1).is_file()
+
+    def _forbid_open(*args, **kwargs):
+        raise AssertionError("同图留底不应再次打开解码图片")
+
+    monkeypatch.setattr("irmia.vision.Image.open", _forbid_open)
+    sha2, dhash2, path2 = make_kept_jpeg(str(src), keep_root)
+    assert (sha2, dhash2, path2) == (sha1, "", path1)

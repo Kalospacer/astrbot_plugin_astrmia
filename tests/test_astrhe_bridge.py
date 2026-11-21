@@ -153,3 +153,78 @@ def test_astrhe_database_bridge(tmp_path: Path) -> None:
         await store.close()
 
     asyncio.run(_run())
+
+
+def test_store_threadsafe_concurrent_reads_and_astrhe_reload(tmp_path: Path) -> None:
+    """工作线程查消息与主协程写状态、触发 astrhe.db mtime 重连并发执行不报错。"""
+    import os
+
+    astrhe_dir = tmp_path / "astrbot_plugin_astrhe"
+    astrhe_dir.mkdir(parents=True, exist_ok=True)
+    astrhe_db = astrhe_dir / "astrhe.db"
+    umo = "aiocqhttp:GroupMessage:9001"
+
+    conn = sqlite3.connect(str(astrhe_db))
+    conn.execute(
+        """
+        CREATE TABLE messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            umo TEXT NOT NULL,
+            platform_id TEXT NOT NULL DEFAULT '',
+            message_type TEXT NOT NULL DEFAULT '',
+            session_id TEXT NOT NULL DEFAULT '',
+            platform_message_id TEXT,
+            sender_id TEXT NOT NULL DEFAULT '',
+            sender_name TEXT NOT NULL DEFAULT '',
+            sender_card TEXT NOT NULL DEFAULT '',
+            text TEXT NOT NULL DEFAULT '',
+            ts REAL NOT NULL,
+            is_bot INTEGER NOT NULL DEFAULT 0,
+            recalled INTEGER NOT NULL DEFAULT 0,
+            source TEXT NOT NULL DEFAULT 'live'
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO messages(umo, platform_id, message_type, session_id, sender_id, sender_name, text, ts) "
+        "VALUES(?,?,?,?,?,?,?,?)",
+        (umo, "aiocqhttp", "GroupMessage", "9001", "1001", "甲", "并发基线消息", 1700000001.0),
+    )
+    conn.commit()
+    conn.close()
+
+    async def _run() -> None:
+        store = IrmiaStore(tmp_path / "astrmia", astrhe_db_path=astrhe_db)
+        await store.open()
+        try:
+            def _worker_reads() -> None:
+                for _ in range(50):
+                    row = store.get_message(umo, 1)
+                    assert row is not None and row.text == "并发基线消息"
+                    rows = store.fetch_messages(umo, limit=5)
+                    assert rows and rows[0].id == 1
+
+            async def _main_writes_and_reloads() -> None:
+                base_mtime = astrhe_db.stat().st_mtime
+                for i in range(50):
+                    os.utime(astrhe_db, (base_mtime + i + 1, base_mtime + i + 1))
+                    await store.ensure_message_recorded(
+                        umo=umo,
+                        sender_id="1001",
+                        text=f"同步群名 {i}",
+                        group_name=f"并发群{i}",
+                    )
+                    sessions = await store.list_sessions(0.0, include_unread=True)
+                    assert any(s.umo == umo for s in sessions)
+
+            await asyncio.gather(
+                asyncio.to_thread(_worker_reads),
+                asyncio.to_thread(_worker_reads),
+                asyncio.to_thread(_worker_reads),
+                asyncio.to_thread(_worker_reads),
+                _main_writes_and_reloads(),
+            )
+        finally:
+            await store.close()
+
+    asyncio.run(_run())

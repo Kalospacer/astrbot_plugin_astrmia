@@ -900,3 +900,91 @@ async def test_wake_final_silent_text_is_discarded(
             summary.assert_not_awaited()
     finally:
         await rt.terminate()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "raw_prompt, has_astrhe, expect_astrhe, expect_custom",
+    [
+        ("", True, True, False),
+        ("", False, False, False),
+        ("DEFAULT", False, False, False),
+        ("自定义心跳 {quiet_min}m #{idle_ticks}", False, False, True),
+    ],
+)
+async def test_wake_prompt_adapts_to_astrhe_presence(
+    tmp_path, monkeypatch, raw_prompt, has_astrhe, expect_astrhe, expect_custom
+):
+    """未自定义心跳提示词时按是否安装 AstrHe 自动切换默认文案，自定义文案原样生效。"""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, Mock
+
+    from irmia.config import DEFAULT_HEARTBEAT_PROMPT
+    from irmia.heartbeat import HeartbeatFiring
+
+    master = "aiocqhttp:FriendMessage:114514"
+    captured: list[str] = []
+
+    class _FakeToolMgr:
+        def get_builtin_tool(self, _cls):
+            return None
+
+        def get_func(self, name: str):
+            return object() if (has_astrhe and name == "astrhe_read_todos") else None
+
+    ctx = FakeContext()
+    ctx.get_llm_tool_manager = Mock(return_value=_FakeToolMgr())
+    cfg: dict[str, Any] = {"master_umo": master, "heartbeat_enabled": False}
+    if raw_prompt == "DEFAULT":
+        cfg["heartbeat_prompt"] = DEFAULT_HEARTBEAT_PROMPT
+    elif raw_prompt:
+        cfg["heartbeat_prompt"] = raw_prompt
+
+    rt = IrmiaRuntime(
+        ctx,
+        cfg,
+        logging.getLogger("test"),
+        data_dir=tmp_path,
+    )
+    await rt.initialize()
+    try:
+        runner = SimpleNamespace(
+            step_until_done=Mock(return_value=AsyncMock()),
+            get_final_llm_resp=Mock(return_value=SimpleNamespace(completion_text="")),
+        )
+
+        async def _fake_build(**kwargs):
+            captured.append(kwargs["req"].prompt)
+            return SimpleNamespace(agent_runner=runner, reset_coro=None)
+
+        monkeypatch.setattr("astrbot.core.astr_main_agent.build_main_agent", _fake_build)
+        monkeypatch.setattr(
+            "astrbot.core.pipeline.context.call_event_hook", AsyncMock()
+        )
+        monkeypatch.setattr("astrbot.core.agent.tool.ToolSet.add_tool", Mock())
+        monkeypatch.setattr(rt, "_bind_master_conversation", AsyncMock())
+        monkeypatch.setattr(
+            "astrbot.core.provider.entities.ProviderRequest",
+            Mock(return_value=SimpleNamespace(prompt="", tool_calls_result=[])),
+        )
+
+        await rt._run_wake_turn(
+            master,
+            HeartbeatFiring(
+                quiet_seconds=120, probability=1, roll=0, idle_ticks=3, alpha=1
+            ),
+        )
+
+        assert len(captured) == 1
+        prompt = captured[0]
+        if expect_custom:
+            assert prompt == "自定义心跳 2.0m #3"
+        elif expect_astrhe:
+            assert "astrhe_read_todos" in prompt
+            assert "2.0 分钟" in prompt and "第 3 次" in prompt
+        else:
+            assert "astrhe_" not in prompt
+            assert "read_channel" in prompt and "send_message_to_user" in prompt
+            assert "2.0 分钟" in prompt and "第 3 次" in prompt
+    finally:
+        await rt.terminate()

@@ -7,14 +7,18 @@ import contextvars
 import json
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from astrbot.api.event import MessageChain
-
-from .config import IrmiaConfig, is_in_quiet_window, load_irmia_config
+from .config import (
+    DEFAULT_HEARTBEAT_PROMPT,
+    STANDALONE_HEARTBEAT_PROMPT,
+    IrmiaConfig,
+    is_in_quiet_window,
+    load_irmia_config,
+)
 from .heartbeat import HeartbeatEngine, HeartbeatFiring
 from .inbox import GroupBatcher, evaluate_channel_message
 from .mention import build_mention_notice
@@ -39,6 +43,18 @@ from .vision import VisionStore
 from .vision_describe import Captioner
 from .vision_keep import keep_event_images
 from .wake_summary import build_wake_material, summarize_wake
+
+try:
+    from astrbot.api.event import MessageChain
+except Exception:  # pragma: no cover - 单测无 AstrBot 环境时的轻量兜底
+
+    @dataclass
+    class MessageChain:  # type: ignore[no-redef]
+        chain: list[Any] = field(default_factory=list)
+
+        def get_plain_text(self) -> str:
+            return "".join(str(getattr(item, "text", item)) for item in self.chain)
+
 
 try:
     from astrbot.core.agent.message import TextPart
@@ -263,6 +279,8 @@ class IrmiaRuntime:
         self._heartbeat_task: asyncio.Task[None] | None = None
         self._bg_tasks: set[asyncio.Task[Any]] = set()
         self._tools_registered = False
+        self._read_channel_tool: ReadChannelTool | None = None
+        self._read_image_tool: ReadImageTool | None = None
         # 夜间静默窗口状态：记住上一拍是否在窗口内，用来在出窗口时把心率计时归零
         self._was_in_quiet = False
         # 留底和描述缓存每小时清理一次，不依赖心跳唤醒开关。
@@ -270,7 +288,7 @@ class IrmiaRuntime:
         self._install_send_message_patch()
 
     def cfg(self) -> IrmiaConfig:
-        """动态读取当前最新配置并按需同步心跳参数。"""
+        """动态读取当前最新配置并按需同步心跳参数与工具描述。"""
         c = load_irmia_config(self._raw_config)
         self.heartbeat.reconfigure(
             floor_min=c.heartbeat_floor_min,
@@ -278,6 +296,7 @@ class IrmiaRuntime:
             target_mean_min=c.heartbeat_target_mean_min,
             tick_sec=c.heartbeat_tick_sec,
         )
+        self._sync_tool_descriptions(c)
         return c
 
     def tz_name(self) -> str:
@@ -339,6 +358,18 @@ class IrmiaRuntime:
         task.add_done_callback(self._bg_tasks.discard)
         return task
 
+    def _sync_tool_descriptions(self, cfg: IrmiaConfig) -> None:
+        """按最新配置原地刷新已注册工具的描述文本。"""
+        if self._read_channel_tool is not None:
+            self._read_channel_tool.description = read_channel_description(
+                cfg.topic_summary_enabled,
+                segment_msg_count=cfg.segment_msg_count,
+            )
+        if self._read_image_tool is not None:
+            self._read_image_tool.description = READ_IMAGE_DESCRIPTION.format(
+                keep_days=cfg.image_keep_days
+            )
+
     def _register_tools(self) -> None:
         if self._tools_registered:
             return
@@ -346,24 +377,22 @@ class IrmiaRuntime:
         if not callable(add_llm_tools):
             return
         try:
-            add_llm_tools(
-                ReadChannelTool(
-                    handler_fn=self._handle_read_channel_tool,
-                    description=read_channel_description(
-                        self.cfg().topic_summary_enabled,
-                        segment_msg_count=self.cfg().segment_msg_count,
-                    ),
-                ),
-                # 群聊消息里的图片用 read_image 看。
-                ReadImageTool(
-                    handler_fn=self._handle_read_image_tool,
-                    description=READ_IMAGE_DESCRIPTION.format(
-                        keep_days=self.cfg().image_keep_days
-                    ),
-                ),
+            cfg = self.cfg()
+            read_channel_tool = ReadChannelTool(
+                handler_fn=self._handle_read_channel_tool,
             )
+            # 群聊消息里的图片用 read_image 看。
+            read_image_tool = ReadImageTool(
+                handler_fn=self._handle_read_image_tool,
+            )
+            self._read_channel_tool = read_channel_tool
+            self._read_image_tool = read_image_tool
+            self._sync_tool_descriptions(cfg)
+            add_llm_tools(read_channel_tool, read_image_tool)
             self._tools_registered = True
         except Exception as exc:
+            self._read_channel_tool = None
+            self._read_image_tool = None
             self.logger.warning(f"[IRMIA] 注册工具失败: {exc}")
 
     async def _handle_read_image_tool(
@@ -1037,10 +1066,10 @@ class IrmiaRuntime:
             event.set_extra("irmia_final_llm_resp", True)
 
     async def on_decorating_result(self, event: Any) -> None:
-        """拦截过渡文字、[SILENT] 与工具回流。
+        """处理最终回复步的 [SILENT] 整链丢弃与工具回复回流。
 
-        1. 在 OnLLMResponseEvent 触发前（即模型仍在调用 read_channel / send_message_to_user 的中间步骤），
-           模型顺嘴输出的过渡文字（preamble）在此直接收起，不发往聊天窗口，也不开启 irmia_in_decorating。
+        1. 在 OnLLMResponseEvent 触发前（即模型仍在调用工具的中间步骤），正文照常放行，
+           但延后置位 irmia_in_decorating，避免 intercept_direct_reply 的暂存回流提前失效。
         2. 最终步若模型曾通过 send_message_to_user 发往当前唤醒窗口，暂存的真实回复链在此处替换掉
            模型末尾的自言自语总结，继续交给后续装饰钩子（表情包替换、分段发送）。
         """
@@ -1268,8 +1297,33 @@ class IrmiaRuntime:
         cfg = self.cfg()
         session = MessageSession.from_str(master_umo)
 
+        raw_prompt = str(self._raw_config.get("heartbeat_prompt", "") or "").strip()
+        is_default_prompt = (not raw_prompt) or (
+            raw_prompt == DEFAULT_HEARTBEAT_PROMPT.strip()
+        )
+        if not is_default_prompt:
+            prompt_template = raw_prompt
+        else:
+            has_astrhe = False
+            checked_tools = False
+            try:
+                tm = self.context.get_llm_tool_manager()
+                get_func = getattr(tm, "get_func", None)
+                if callable(get_func):
+                    checked_tools = True
+                    has_astrhe = get_func("astrhe_read_todos") is not None
+            except Exception:
+                pass
+            if not checked_tools:
+                has_astrhe = bool(
+                    self.store.astrhe_db_path and self.store.astrhe_db_path.is_file()
+                )
+            prompt_template = (
+                cfg.heartbeat_prompt if has_astrhe else STANDALONE_HEARTBEAT_PROMPT
+            )
+
         prompt_text = render_heartbeat_prompt(
-            cfg.heartbeat_prompt, firing.quiet_seconds, firing.idle_ticks
+            prompt_template, firing.quiet_seconds, firing.idle_ticks
         )
 
         wake_event = HeartbeatWakeEvent(
@@ -1410,9 +1464,13 @@ class IrmiaRuntime:
             return
         conv_mgr = self.context.conversation_manager
         async with self._brain_lock:
-            req.conversation = await conv_mgr.get_conversation(
+            fresh_conv = await conv_mgr.get_conversation(
                 master_umo, req.conversation.cid
             )
+            if fresh_conv is None:
+                self.logger.warning("[IRMIA] 唤醒小结跳过：主脑对话已不存在")
+                return
+            req.conversation = fresh_conv
             await persist_agent_history(
                 conv_mgr,
                 event=wake_event,
@@ -1430,7 +1488,9 @@ class IrmiaRuntime:
         dist = self.heartbeat.distribution()
         quiet_min = self.heartbeat.quiet_ms() / 60_000.0
         cur_p = self.heartbeat.current_probability()
-        sessions = await self.store.list_sessions(include_unread=True)
+        sessions = await self.store.list_sessions(
+            self.day_start_ts(cfg), include_unread=True
+        )
         astrhe_linked = (
             "已连接"
             if self.store.astrhe_db_path and self.store.astrhe_db_path.is_file()

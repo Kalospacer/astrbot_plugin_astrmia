@@ -261,3 +261,133 @@ def test_wake_summary_uses_heartbeat_provider(
             await runtime.terminate()
 
     asyncio.run(run())
+
+
+def test_status_report_counts_today_and_history_segments(tmp_path: Path) -> None:
+    """/astrmia status 传入当天起点，准确统计今天与历史分段数。"""
+
+    async def run() -> None:
+        ctx = FakeContext()
+        raw_cfg = {
+            "topic_summary_enabled": True,
+            "master_umo": MASTER_UMO,
+            "heartbeat_enabled": False,
+        }
+        runtime = IrmiaRuntime(
+            context=ctx,
+            config=raw_cfg,
+            logger=logging.getLogger("test"),
+            data_dir=tmp_path,
+        )
+        await runtime.initialize()
+        try:
+            day_start = runtime.day_start_ts(runtime.cfg())
+            await runtime.store.ensure_message_recorded(
+                umo=UMO, text="测试群消息", ts=day_start + 10
+            )
+            await runtime.store.append_topic_segment(
+                UMO,
+                start_msg_id=1,
+                end_msg_id=10,
+                start_ts=day_start - 100,
+                end_ts=day_start - 10,
+                summary="昨天的段",
+            )
+            await runtime.store.append_topic_segment(
+                UMO,
+                start_msg_id=11,
+                end_msg_id=20,
+                start_ts=day_start + 1,
+                end_ts=day_start + 5,
+                summary="今天的段",
+            )
+
+            status_on = await runtime.status_report()
+            assert "今天 1 段 / 历史 1 段" in status_on
+
+            raw_cfg["topic_summary_enabled"] = False
+            status_off = await runtime.status_report()
+            assert "今天 1 段" not in status_off
+            assert " 段" not in status_off
+        finally:
+            await runtime.terminate()
+
+    asyncio.run(run())
+
+
+def test_tool_descriptions_hot_reload_on_config_change(tmp_path: Path) -> None:
+    """运行期热改配置时，已注册工具的描述文本随之原地刷新。"""
+
+    async def run() -> None:
+        ctx = FakeContext()
+        raw_cfg: dict[str, object] = {
+            "topic_summary_enabled": True,
+            "topic_options": {"segment_msg_count": 25},
+            "image_keep_days": 3,
+            "heartbeat_enabled": False,
+        }
+        runtime = IrmiaRuntime(
+            context=ctx,
+            config=raw_cfg,
+            logger=logging.getLogger("test"),
+            data_dir=tmp_path,
+        )
+        await runtime.initialize()
+        try:
+            read_ch, read_img = ctx.registered_tools[0], ctx.registered_tools[1]
+            assert "段目录" in read_ch.description and "25 条" in read_ch.description
+            assert "最近 3 天" in read_img.description
+
+            raw_cfg["topic_summary_enabled"] = False
+            raw_cfg["image_keep_days"] = 7
+            runtime.cfg()
+            assert "段目录" not in read_ch.description and "原文" in read_ch.description
+            assert "最近 7 天" in read_img.description
+
+            raw_cfg["topic_summary_enabled"] = True
+            raw_cfg["topic_options"] = {"segment_msg_count": 50}
+            runtime.cfg()
+            assert "段目录" in read_ch.description and "50 条" in read_ch.description
+        finally:
+            await runtime.terminate()
+
+    asyncio.run(run())
+
+
+def test_wake_summary_skips_when_conversation_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """锁内重读主脑对话返回 None 时安全跳过，不调用 persist_agent_history。"""
+
+    async def run() -> None:
+        ctx = FakeContext()
+        ctx.conversation_manager.get_conversation = AsyncMock(return_value=None)  # type: ignore[method-assign]
+        runtime = IrmiaRuntime(
+            context=ctx,
+            config={"heartbeat_enabled": False},
+            logger=logging.getLogger("test"),
+            data_dir=tmp_path,
+        )
+        monkeypatch.setattr(
+            runtime.topic_summarizer, "resolve_provider", AsyncMock(return_value=object())
+        )
+        monkeypatch.setattr(
+            "irmia.runtime.summarize_wake", AsyncMock(return_value="看过群聊")
+        )
+        persist = AsyncMock()
+        monkeypatch.setattr(
+            "astrbot.core.utils.history_saver.persist_agent_history", persist
+        )
+        try:
+            req = SimpleNamespace(
+                conversation=SimpleNamespace(cid="gone_cid"), tool_calls_result=[]
+            )
+            event = FakeEvent(MASTER_UMO, "心跳", private=True)
+            await runtime._append_wake_summary(
+                MASTER_UMO, event, req, "心跳提示", "", runtime.cfg()
+            )
+            persist.assert_not_awaited()
+        finally:
+            await runtime.terminate()
+
+    asyncio.run(run())

@@ -14,6 +14,12 @@ DEFAULT_HEARTBEAT_PROMPT = """[自主唤醒] 距上次有人私聊或在群中�
 4. 查看会话清单，用 read_channel 检查关注的会话。有可参与的话题时用 send_message_to_user 发送一条消息，每次仅处理一件事，发送后等待。
 5. 无可执行事项，或目标联系人近期已交互过时，不发送任何消息，静默结束本轮。"""
 
+STANDALONE_HEARTBEAT_PROMPT = """[自主唤醒] 距上次有人私聊或在群中唤醒你已 {quiet_min} 分钟，本轮空闲期内第 {idle_ticks} 次唤醒。
+
+1. 查看下方会话清单，用 read_channel 检查关注或有新动态的会话。
+2. 有可自然参与的话题或想联系的对象时，用 send_message_to_user 发送一条消息；每次仅处理一件事，发送后等待。
+3. 无可执行事项，或目标联系人近期已交互过时，不发送任何消息，静默结束本轮。"""
+
 
 def _coerce_number(
     value: Any,
@@ -246,14 +252,18 @@ def load_irmia_config(raw: dict[str, Any] | None) -> IrmiaConfig:
         read_channel_image_max=_group_int("vision_options", "image_max", 6),
         read_channel_image_wait_sec=_group_int("vision_options", "wait_sec", 8),
         image_brief_max_chars=_group_int("vision_options", "brief_max_chars", 80),
-        read_image_max_chars=_group_int("vision_options", "read_max_chars", 500),
+        read_image_max_chars=_group_int(
+            "vision_options", "read_max_chars", 500, minimum=0
+        ),
         vision_provider_ids=[
             str(p).strip()
             for p in cfg.get("vision_provider_ids", [])
             if str(p).strip()
         ],
         vision_timeout_sec=_group_int("vision_options", "timeout_sec", 60),
-        vision_cache_ttl_days=_group_int("vision_options", "cache_ttl_days", 30),
+        vision_cache_ttl_days=_group_int(
+            "vision_options", "cache_ttl_days", 30, minimum=0
+        ),
         topic_max_chars=_group_int("topic_options", "max_chars", 24),
         topic_line_max_chars=_group_int("topic_options", "line_max_chars", 120),
         segment_rows_per_page=_group_int("topic_options", "segment_rows_per_page", 10),

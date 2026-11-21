@@ -95,7 +95,7 @@ git clone https://github.com/Kalospacer/astrbot_plugin_astrmia
 |---|---|---|
 | `heartbeat_enabled` | `true` | 空闲时按概率周期性触发主动对话轮；关闭后仅响应 @、关键词与私聊 |
 | `heartbeat_provider_id` | 空 | 唤醒对话轮与唤醒小结共用的模型，留空使用主会话默认模型 |
-| `heartbeat_prompt` | 内置文案 | 唤醒时注入的指令，支持 `{quiet_min}` 与 `{idle_ticks}` 占位符 |
+| `heartbeat_prompt` | 内置文案 | 唤醒时注入的指令，支持 `{quiet_min}` 与 `{idle_ticks}` 占位符；留空或未修改默认时按是否安装 AstrHe 自动适配 |
 | `heartbeat_quiet_enabled` | `false` | 夜间免打扰，时段内暂停自主唤醒抽签 |
 | `heartbeat_quiet_start_hour` | `22` | 免打扰开始整点（0~23），晚于结束整点表示跨零点窗口 |
 | `heartbeat_quiet_end_hour` | `8` | 免打扰结束整点（0~23） |
@@ -150,7 +150,7 @@ git clone https://github.com/Kalospacer/astrbot_plugin_astrmia
 | `vision_options.image_max` | `6` | 单次新识别图片上限 |
 | `vision_options.wait_sec` | `8` | 读群等待识图秒数，超时转入后台 |
 | `vision_options.brief_max_chars` | `80` | 消息行描述截断字数 |
-| `vision_options.read_max_chars` | `500` | read_image 返回字数上限 |
+| `vision_options.read_max_chars` | `500` | read_image 返回字数上限，0 表示不限制 |
 | `vision_options.timeout_sec` | `60` | 单次识图请求超时秒数 |
 | `vision_options.cache_ttl_days` | `30` | 描述缓存保留天数 |
 

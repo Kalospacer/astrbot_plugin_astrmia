@@ -471,3 +471,45 @@ def test_expand_segment_stops_at_end_with_interleaved_ids(
             await store.close()
 
     asyncio.run(_run())
+
+
+@pytest.mark.parametrize("fail_on_call", [1, 2])
+def test_maybe_summarize_aborts_tail_when_segment_fails(
+    tmp_path: Path, fail_on_call: int
+) -> None:
+    """某段模型返回空时立刻止损返回，不把整批未消费消息再塞进 tail 重试。"""
+    calls: list[str] = []
+
+    class _FlakyProvider:
+        async def text_chat(self, prompt: str, session_id: str, persist: bool) -> Any:
+            calls.append(prompt)
+            if len(calls) == fail_on_call:
+                return SimpleNamespace(completion_text="")
+            return SimpleNamespace(completion_text='{"topic": "第一段话题"}')
+
+    async def _run() -> None:
+        store = IrmiaStore(tmp_path / f"fail_{fail_on_call}")
+        await store.open()
+        try:
+            await _feed(store, 1, 60)
+            cfg = load_irmia_config({})
+            cfg.topic_cooldown_sec = 0
+            cfg.topic_min_unread = 1
+
+            summarizer = TopicSummarizer(store, None, logging.getLogger("test"))
+
+            async def _fake_resolve(umo: str, provider_id: str) -> Any:
+                return _FlakyProvider()
+
+            summarizer.resolve_provider = _fake_resolve  # type: ignore[method-assign]
+            await summarizer.maybe_summarize(UMO, cfg, force_for_mention=True)
+
+            assert len(calls) == fail_on_call
+            segs = store.list_topic_segments(UMO, after_id=0, limit=10)
+            assert len(segs) == fail_on_call - 1
+            st = await store.get_session_state(UMO)
+            assert st["topic_to_id"] == (25 if fail_on_call == 2 else 0)
+        finally:
+            await store.close()
+
+    asyncio.run(_run())

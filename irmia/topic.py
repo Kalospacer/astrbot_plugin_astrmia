@@ -168,7 +168,7 @@ class TopicSummarizer:
                     consumed = (i + 1) * window
                     continue
                 if not summary:
-                    break
+                    return latest_topic
 
                 await self.store.append_topic_segment(
                     umo,

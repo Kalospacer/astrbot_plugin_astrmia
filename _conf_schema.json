@@ -61,7 +61,7 @@
     "description": "自主唤醒提示词",
     "type": "text",
     "default": "[自主唤醒] 距上次有人私聊或在群中唤醒你已 {quiet_min} 分钟，本轮空闲期内第 {idle_ticks} 次唤醒。\n\n1. 核对待办与规划：规划用 astrhe_read_plan，待办用 astrhe_read_todos。选取一件当前可完成的事项执行，完成后用 astrhe_todo_update 记录；已失效的条目标记为放弃。\n2. 对话中出现的新约定用 astrhe_todo_add 记录并关联对应会话；计划变更用 astrhe_todo_edit 或 astrhe_plan_edit 更新。\n3. 暂时无法处理的事项用 astrhe_schedule 设定提醒时间，到期将自动唤醒。\n4. 查看会话清单，用 read_channel 检查关注的会话。有可参与的话题时用 send_message_to_user 发送一条消息，每次仅处理一件事，发送后等待。\n5. 无可执行事项，或目标联系人近期已交互过时，不发送任何消息，静默结束本轮。",
-    "hint": "唤醒时注入的用户指令。支持占位符 {quiet_min}（空闲分钟数）与 {idle_ticks}（本轮空闲期内唤醒次数）。留空使用内置默认。",
+    "hint": "唤醒时注入的用户指令。支持占位符 {quiet_min}（空闲分钟数）与 {idle_ticks}（本轮空闲期内唤醒次数）。留空或未修改默认时，按是否安装 AstrHe 自动选用对应内置提示词。",
     "condition": {
       "heartbeat_enabled": true
     }
@@ -259,7 +259,7 @@
         "description": "read_image 返回字数上限",
         "type": "int",
         "default": 500,
-        "hint": "read_image 工具返回内容的字数上限。"
+        "hint": "read_image 工具返回内容的字数上限，0 表示不限制、返回完整描述。"
       },
       "timeout_sec": {
         "description": "单次识图请求超时秒数",
