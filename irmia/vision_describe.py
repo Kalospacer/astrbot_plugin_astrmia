@@ -81,10 +81,37 @@ def build_qa_prompt(base_prompt: str, question: str) -> str:
     )
 
 
+#: 常见结构化识图模板的分节标头（仅在行内缩略展示时剥离，不改存储原文）
+BRIEF_SECTION_HEADER_RE = re.compile(
+    r"(?:^|\s)#{1,6}\s+(?:Image Type|OCR Text|Full Text Representation|Visual Elements|Layout|Context|Summary|Description|Caption)\b[:：]?",
+    re.IGNORECASE,
+)
+#: 其他通用 Markdown 标题前缀与行内格式符
+MARKDOWN_HASH_RE = re.compile(r"(?:^|(?<=\s))#{1,6}\s+")
+MARKDOWN_INLINE_RE = re.compile(r"\*\*|__|`|~~")
+MARKDOWN_BULLET_RE = re.compile(r"(?:^|\s)-\s+")
+
+
 def sanitize_caption_text(text: str) -> str:
     """把方括号换全角、空白压成单空格，避免撑坏 `[图片: ...]` 占位符。"""
     clean = str(text or "").replace("[", "［").replace("]", "］")
     return re.sub(r"\s+", " ", clean).strip()
+
+
+def condense_caption_for_brief(text: str) -> str:
+    """净化行内缩略展示的识图描述：剥离 Markdown 标题壳与强调符，把字数配额留给有效正文。"""
+    clean = sanitize_caption_text(text)
+    if not clean:
+        return ""
+    condensed = BRIEF_SECTION_HEADER_RE.sub("｜", clean)
+    condensed = MARKDOWN_HASH_RE.sub("", condensed)
+    condensed = MARKDOWN_INLINE_RE.sub("", condensed)
+    condensed = MARKDOWN_BULLET_RE.sub(" ", condensed)
+    condensed = re.sub(r"\s*｜\s*", "｜", condensed)
+    condensed = re.sub(r"｜{2,}", "｜", condensed)
+    condensed = re.sub(r"([：，。！？；])\s+", r"\1", condensed)
+    condensed = re.sub(r"\s+", " ", condensed).strip("｜ ")
+    return condensed or clean
 
 
 def truncate_caption(text: str, max_chars: int) -> str:
@@ -245,6 +272,7 @@ class Captioner:
             eligible[0].umo,
             [row.platform_message_id for row in eligible],
         )
+        cache_only = max_new <= 0
         captions: dict[int, list[str | None]] = {}
         pending: list[tuple[ChannelMessageRow, KeptImage, int]] = []
         for row in eligible:
@@ -270,9 +298,14 @@ class Captioner:
                 hit = await asyncio.to_thread(
                     self.vstore.find_desc, kept.sha256, KIND_FULL, ""
                 )
-                slots[slot_idx] = hit or None
-                if not hit:
+                if hit:
+                    slots[slot_idx] = hit
+                elif not cache_only:
+                    slots[slot_idx] = None
                     pending.append((row, kept, slot_idx))
+
+        if cache_only:
+            return captions
 
         tasks: dict[asyncio.Task[str], list[tuple[int, int]]] = {}
         pending.sort(key=lambda item: (item[0].id, item[1].idx), reverse=True)
@@ -296,15 +329,17 @@ class Captioner:
                     captions[row_id][slot_idx] = text or None
         return captions
 
-    async def describe_for_tool(self, umo: str, kept: KeptImage, question: str) -> str:
-        """不带问题给完整描述，带问题针对问题回答；命中缓存直接返回并按上限裁切。
+    async def describe_for_tool(
+        self, umo: str, kept: KeptImage, question: str, *, offset: int = 0
+    ) -> str:
+        """不带问题给完整描述，带问题针对问题回答；超长时按 offset 本地分页续读。
 
         这里只要完整描述，不接受旧的一句话简述凑数：read_image 存在的意义就是把
-        细节看全。缓存里存完整原文，返回时按 read_image_max_chars 裁切（0 表示不限制）。
+        细节看全。缓存里存完整原文，返回时按 read_image_max_chars 分段（0 表示不限制）。
         """
         cfg = self.cfg_getter()
         kind = KIND_QA if question else KIND_FULL
-        hit = await asyncio.to_thread(
+        full_text = await asyncio.to_thread(
             self.vstore.find_desc,
             kept.sha256,
             kind,
@@ -312,10 +347,33 @@ class Captioner:
             kept.dhash,
             False,
         )
-        if hit:
-            return truncate_caption(hit, cfg.read_image_max_chars)
-        text = await asyncio.shield(self._task_for(umo, kept, question))
-        return truncate_caption(text, cfg.read_image_max_chars)
+        if not full_text:
+            full_text = await asyncio.shield(self._task_for(umo, kept, question))
+        if not full_text:
+            return ""
+
+        start = max(0, int(offset))
+        total = len(full_text)
+        if start >= total:
+            return f"已超出这张图描述的末尾（共 {total} 字）。"
+
+        max_chars = cfg.read_image_max_chars
+        if max_chars <= 0:
+            return full_text if start == 0 else full_text[start:]
+
+        if start == 0 and total <= max_chars:
+            return full_text
+
+        end = min(total, start + max_chars)
+        chunk = full_text[start:end]
+        if end < total:
+            qa_tip = "" if question else "，或传 question=<问题> 按图定向追问"
+            return (
+                f"{chunk}\n"
+                f"（已显示第 {start + 1}~{end} / 共 {total} 字；"
+                f"继续看后半段请传 offset={end}{qa_tip}）"
+            )
+        return f"{chunk}\n（已显示第 {start + 1}~{total} / 共 {total} 字，已到末尾）"
 
 
 def render_with_captions(
@@ -332,17 +390,23 @@ def render_with_captions(
             caption = next(slots, "")
             if caption == "":
                 return match.group(0)
-            clean = (
-                sanitize_caption_text(caption)
-                if caption is not None
-                else PENDING_TEXT
-            )
+            if caption is None:
+                clean = PENDING_TEXT
+            elif max_chars > 0:
+                clean = condense_caption_for_brief(caption)
+            else:
+                clean = sanitize_caption_text(caption)
             return f"[图片: {truncate_caption(clean, max_chars)}]"
 
         rendered = BARE_IMAGE_RE.sub(replace, rendered)
 
     def shrink(match: re.Match[str]) -> str:
-        clean = re.sub(r"\s+", " ", match.group(1)).strip()
+        raw_desc = match.group(1)
+        clean = (
+            condense_caption_for_brief(raw_desc)
+            if max_chars > 0
+            else re.sub(r"\s+", " ", raw_desc).strip()
+        )
         return f"[图片: {truncate_caption(clean, max_chars)}]"
 
     return DESCRIBED_IMAGE_RE.sub(shrink, rendered)

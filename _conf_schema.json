@@ -110,7 +110,7 @@
     "description": "群聊识图",
     "type": "bool",
     "default": true,
-    "hint": "开启后 read_channel 与话题概括自动为图片生成文字描述，优先复用缓存。提示词与首选模型跟随 AstrBot 核心的图片转述配置。"
+    "hint": "开启后在 read_channel 与群点名时按需为图片生成文字描述并复用缓存；后台话题概括仅复用已有缓存，不主动发起新识图。提示词与首选模型跟随 AstrBot 核心的图片转述配置。"
   },
   "vision_provider_ids": {
     "description": "识图兜底模型",
@@ -135,17 +135,11 @@
       "topic_summary_enabled": true
     },
     "items": {
-      "min_unread": {
-        "description": "触发阈值（未读条数）",
-        "type": "int",
-        "default": 5,
-        "hint": "群未读消息达到该数量且冷却结束时触发一次概括。"
-      },
       "cooldown_sec": {
         "description": "触发冷却秒数",
         "type": "int",
         "default": 180,
-        "hint": "同一会话两次概括之间的最短间隔，失败的尝试同样计入。被点名的强制触发不受此限制。"
+        "hint": "同一会话两次整段概括之间的最短间隔，失败的尝试同样计入。被点名的强制触发不受此限制。"
       },
       "max_chars": {
         "description": "话题摘要字数上限",
@@ -241,7 +235,7 @@
         "description": "单次新识别图片上限",
         "type": "int",
         "default": 6,
-        "hint": "单次读群或概括最多新发起的识图请求数，缓存命中不占名额。"
+        "hint": "单次读群或点名最多新发起的识图请求数，缓存命中不占名额。"
       },
       "wait_sec": {
         "description": "等待识图秒数",
@@ -253,13 +247,13 @@
         "description": "消息行描述截断字数",
         "type": "int",
         "default": 80,
-        "hint": "read_channel 消息行内图片描述的截断字数，完整描述仍可通过 read_image 查看。"
+        "hint": "read_channel 消息行内图片描述的截断字数（展示前自动剥离 Markdown 标题符号），完整描述仍可通过 read_image 查看。"
       },
       "read_max_chars": {
-        "description": "read_image 返回字数上限",
+        "description": "read_image 单次返回字数上限",
         "type": "int",
         "default": 500,
-        "hint": "read_image 工具返回内容的字数上限，0 表示不限制、返回完整描述。"
+        "hint": "read_image 单次返回内容的字数上限，超长自动给出 offset 续读提示；0 表示不限制、返回完整描述。"
       },
       "timeout_sec": {
         "description": "单次识图请求超时秒数",

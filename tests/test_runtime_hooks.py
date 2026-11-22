@@ -988,3 +988,50 @@ async def test_wake_prompt_adapts_to_astrhe_presence(
             assert "2.0 分钟" in prompt and "第 3 次" in prompt
     finally:
         await rt.terminate()
+
+
+@pytest.mark.asyncio
+async def test_llm_request_injects_unread_status_and_brief_guidance(tmp_path):
+    """on_llm_request 注入的会话清单标明真实未读/无新消息，自述明确引导跳过无新消息会话。"""
+    master = "aiocqhttp:FriendMessage:114514"
+    grp_umo = "aiocqhttp:GroupMessage:888888"
+    ctx = FakeContext()
+    rt = IrmiaRuntime(
+        ctx,
+        {
+            "master_umo": master,
+            "heartbeat_enabled": False,
+            "group_batch_window_sec": 0,
+            "topic_summary_enabled": False,
+            "image_keep_days": 0,
+            "read_channel_image_enabled": False,
+        },
+        logging.getLogger("test"),
+        data_dir=tmp_path,
+    )
+    await rt.initialize()
+    try:
+        priv_ev = FakeEvent(master, "你好", private=True, sender_id="114514", role="admin")
+        await rt.on_incoming_event(priv_ev)
+
+        # 群聊第 1 条建档即已读，随后再进 2 条未点名未读消息
+        for idx, text in enumerate(("建档首条", "未读第一条", "未读第二条"), start=1):
+            ev = FakeEvent(grp_umo, text, private=False, at_bot=False, sender_id="222222")
+            ev.message_obj.message_id = f"grp_unread_{idx}"
+            await rt.on_incoming_event(ev)
+
+        req = FakeReq(prompt="你好")
+        req.system_prompt = ""  # type: ignore[attr-defined]
+        await rt.on_llm_request(priv_ev, req)
+
+        assert "标「无新消息」的会话无需调用 read_channel" in req.system_prompt  # type: ignore[attr-defined]
+        injected = req.extra_user_content_parts[-1].text
+        session_lines = {
+            line.split("｜sid ")[1].split("｜")[0]: line
+            for line in injected.splitlines()
+            if "｜sid " in line
+        }
+        assert "｜无新消息｜" in session_lines[master]
+        assert "｜未读 2 条｜" in session_lines[grp_umo]
+    finally:
+        await rt.terminate()

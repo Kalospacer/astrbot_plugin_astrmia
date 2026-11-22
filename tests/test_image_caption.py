@@ -152,7 +152,8 @@ def test_read_channel_uses_config_chars(tmp_path: Path) -> None:
         wide = await execute_read_channel(
             store=store, sid=UMO, image_brief_max_chars=200
         )
-        assert LONG_CAPTION[:80] in wide
+        assert "# Image Type" not in wide and "# OCR Text" not in wide
+        assert "手机截图｜" + "细节" * 40 in wide
         await store.close()
 
     asyncio.run(_run())
@@ -401,7 +402,7 @@ def test_vision_zero_config_bounds_and_cleanup_never_expires(tmp_path: Path) -> 
 def test_describe_for_tool_respects_read_max_chars(
     tmp_path: Path, question: str
 ) -> None:
-    """read_image 无论有无提问都按 read_max_chars 裁切，设为 0 返回完整原文且不破坏缓存。"""
+    """read_image 超长时按 read_max_chars 本地分页续读，设为 0 返回纯原文且不破坏缓存。"""
     from irmia.config import IrmiaConfig
     from irmia.vision import KeptImage
     from irmia.vision_describe import KIND_QA, Captioner
@@ -422,9 +423,22 @@ def test_describe_for_tool_respects_read_max_chars(
         )
         try:
             kept = KeptImage(0, "sha-long", "", str(tmp_path / "x.jpg"))
-            clipped = await captioner.describe_for_tool(UMO, kept, question)
-            assert len(clipped) == 500
-            assert clipped.endswith("…")
+            page1 = await captioner.describe_for_tool(UMO, kept, question, offset=0)
+            body1, footer1 = page1.split("\n", 1)
+            assert body1 == long_text[:500]
+            assert "第 1~500 / 共 800 字" in footer1
+            assert "offset=500" in footer1
+            assert ("question=" in footer1) is (not question)
+
+            page2 = await captioner.describe_for_tool(UMO, kept, question, offset=500)
+            body2, footer2 = page2.split("\n", 1)
+            assert body1 + body2 == long_text
+            assert "第 501~800 / 共 800 字，已到末尾" in footer2
+
+            overflow = await captioner.describe_for_tool(
+                UMO, kept, question, offset=900
+            )
+            assert "已超出" in overflow and "800" in overflow
 
             cfg.read_image_max_chars = 0
             full = await captioner.describe_for_tool(UMO, kept, question)
@@ -432,6 +446,209 @@ def test_describe_for_tool_respects_read_max_chars(
             assert vstore.find_desc("sha-long", kind, question, "", False) == long_text
         finally:
             vstore.close()
+
+    asyncio.run(_run())
+
+
+def test_condense_caption_for_brief_preserves_content() -> None:
+    """行内预览剥离 Markdown 标题壳与强调符，不误伤正文英文词，纯中文与 max_chars=0 原样保留。"""
+    from irmia.vision_describe import condense_caption_for_brief
+
+    ui_sample = (
+        "# Image Type UI 界面局部截图（自动补全菜单） "
+        "# OCR Text **左侧菜单：** - **re**load-plugins - **AI** 助手"
+    )
+    condensed = condense_caption_for_brief(ui_sample)
+    assert "# Image Type" not in condensed and "# OCR Text" not in condensed
+    assert "**" not in condensed
+    assert condensed.startswith("UI 界面局部截图（自动补全菜单）｜左侧菜单：reload-plugins AI 助手")
+
+    rendered_brief = render_with_captions("[图片]", [ui_sample], 80)
+    assert rendered_brief.startswith("[图片: UI 界面局部截图")
+
+    rendered_full = render_with_captions("[图片]", [ui_sample], 0)
+    assert "# Image Type" in rendered_full
+
+    plain = "一只橘猫趴在键盘上打盹"
+    assert condense_caption_for_brief(plain) == plain
+
+
+def test_caption_rows_cache_only_mode_skips_new_requests(tmp_path: Path) -> None:
+    """max_new=0 仅复用已有缓存：未命中图保留原 [图片] 占位符，且不调用任何视觉模型。"""
+    from unittest.mock import AsyncMock
+
+    from irmia.config import IrmiaConfig
+    from irmia.store import ChannelMessageRow
+    from irmia.vision_describe import Captioner
+
+    async def _run() -> None:
+        vstore = VisionStore(tmp_path / "vision.db", tmp_path / "kept")
+        vstore.open()
+        vstore.add_kept(UMO, "p-hit", 0, "sha-hit", "", str(tmp_path / "h.jpg"))
+        vstore.add_kept(UMO, "p-miss", 0, "sha-miss", "", str(tmp_path / "m.jpg"))
+        vstore.put_desc("sha-hit", KIND_FULL, "", "", "model", "已缓存白猫")
+
+        spawn_calls: list[object] = []
+
+        def _forbid_spawn(coro):
+            spawn_calls.append(coro)
+            raise AssertionError("cache_only 模式不应创建后台识图任务")
+
+        context = SimpleNamespace(
+            get_using_provider_async=AsyncMock(
+                side_effect=AssertionError("cache_only 模式不应调用视觉模型")
+            )
+        )
+        captioner = Captioner(
+            vstore,
+            context,
+            IrmiaConfig,
+            _forbid_spawn,
+            SimpleNamespace(debug=lambda *_: None),
+        )
+        rows = [
+            ChannelMessageRow(
+                id=1,
+                umo=UMO,
+                platform_id="aiocqhttp",
+                message_type="GroupMessage",
+                session_id="606",
+                platform_message_id="p-hit",
+                sender_id="1",
+                sender_name="甲",
+                sender_card="",
+                text="[图片] 看看这只猫",
+                ts=1700000001.0,
+                is_bot=False,
+            ),
+            ChannelMessageRow(
+                id=2,
+                umo=UMO,
+                platform_id="aiocqhttp",
+                message_type="GroupMessage",
+                session_id="606",
+                platform_message_id="p-miss",
+                sender_id="2",
+                sender_name="乙",
+                sender_card="",
+                text="[图片] 另一张新图",
+                ts=1700000002.0,
+                is_bot=False,
+            ),
+        ]
+        try:
+            captions = await captioner.caption_rows(rows, wait_sec=0, max_new=0)
+            assert captions == {1: ["已缓存白猫"], 2: [""]}
+            assert render_with_captions(rows[0].text, captions[1], 0) == "[图片: 已缓存白猫] 看看这只猫"
+            assert render_with_captions(rows[1].text, captions[2], 0) == "[图片] 另一张新图"
+            assert not spawn_calls
+        finally:
+            vstore.close()
+
+    asyncio.run(_run())
+
+
+def test_topic_summarizer_reads_cache_only_for_images(tmp_path: Path) -> None:
+    """话题概括调用 caption_rows 时严格传 wait_sec=0, max_new=0，不触发新识图。"""
+    from irmia.config import load_irmia_config
+    from irmia.topic import TopicSummarizer
+
+    recorded_kwargs: list[dict] = []
+
+    class _SpyCaptioner:
+        async def caption_rows(self, rows, *, wait_sec, max_new):
+            recorded_kwargs.append({"wait_sec": wait_sec, "max_new": max_new})
+            return {rows[0].id: [""]}
+
+    class _Provider:
+        async def text_chat(self, prompt: str, session_id: str, persist: bool) -> object:
+            assert "[图片]" in prompt and "还没看清" not in prompt
+            return SimpleNamespace(completion_text='{"topic": "发图闲聊"}')
+
+    async def _run() -> None:
+        store = IrmiaStore(tmp_path / "topic_cache_only")
+        await store.open()
+        try:
+            await store.ensure_message_recorded(
+                umo=UMO, text="[图片] 晚安", platform_message_id="p-1"
+            )
+            rows = store.fetch_messages(UMO, limit=10)
+            summarizer = TopicSummarizer(
+                store, SimpleNamespace(), SimpleNamespace(debug=lambda *_: None)
+            )
+            summarizer.captioner = _SpyCaptioner()  # type: ignore[assignment]
+            has_text, topic = await summarizer._summarize_rows(
+                rows, load_irmia_config({}), _Provider(), lambda m: "甲"
+            )
+            assert has_text and topic == "发图闲聊"
+            assert recorded_kwargs == [{"wait_sec": 0, "max_new": 0}]
+        finally:
+            await store.close()
+
+    asyncio.run(_run())
+
+
+def test_execute_read_image_passes_offset_and_clamps_negative(tmp_path: Path) -> None:
+    """execute_read_image 透传 offset 续读本地缓存并将负数归零，不触发新识图。"""
+    from unittest.mock import AsyncMock
+
+    from irmia.config import IrmiaConfig
+    from irmia.read_image_tool import execute_read_image
+    from irmia.vision_describe import Captioner
+
+    async def _run() -> None:
+        store = IrmiaStore(tmp_path / "ledger")
+        await store.open()
+        vstore = VisionStore(tmp_path / "vision.db", tmp_path / "kept")
+        vstore.open()
+        context = SimpleNamespace(
+            get_using_provider_async=AsyncMock(
+                side_effect=AssertionError("续读缓存不应调用视觉模型")
+            )
+        )
+        cfg = IrmiaConfig(read_image_max_chars=100)
+        captioner = Captioner(
+            vstore,
+            context,
+            lambda: cfg,
+            asyncio.create_task,
+            SimpleNamespace(debug=lambda *_: None),
+        )
+        try:
+            msg_id = await store.ensure_message_recorded(
+                umo=UMO, text="[图片]", platform_message_id="p-page"
+            )
+            path = tmp_path / "page.jpg"
+            path.write_bytes(b"img")
+            vstore.add_kept(UMO, "p-page", 0, "sha-page", "", str(path))
+            full_text = "A" * 100 + "B" * 60
+            vstore.put_desc("sha-page", KIND_FULL, "", "", "model", full_text)
+
+            p1 = await execute_read_image(
+                store=store,
+                vstore=vstore,
+                captioner=captioner,
+                sid=UMO,
+                msg_id=msg_id,
+                offset=-10,
+                keep_days=3,
+            )
+            assert p1.startswith("A" * 100 + "\n") and "offset=100" in p1
+
+            p2 = await execute_read_image(
+                store=store,
+                vstore=vstore,
+                captioner=captioner,
+                sid=UMO,
+                msg_id=msg_id,
+                offset=100,
+                keep_days=3,
+            )
+            assert p2.startswith("B" * 60 + "\n") and "已到末尾" in p2
+            context.get_using_provider_async.assert_not_awaited()
+        finally:
+            vstore.close()
+            await store.close()
 
     asyncio.run(_run())
 

@@ -35,8 +35,8 @@
 
 ```text
 外部会话：
-- 单聊 · 管理员｜sid aiocqhttp:FriendMessage:10001｜最后 04-15 21:10｜我上次在这说话：5 分钟前
-- 群聊 · 水群｜sid aiocqhttp:GroupMessage:20002｜最后 04-15 21:08｜今天 2 段 / 历史 5 段｜在聊：讨论晚饭吃什么｜我上次在这说话：2 小时前
+- 单聊 · 管理员｜sid aiocqhttp:FriendMessage:10001｜最后 04-15 21:10｜无新消息｜我上次在这说话：5 分钟前
+- 群聊 · 水群｜sid aiocqhttp:GroupMessage:20002｜最后 04-15 21:08｜未读 12 条｜今天 2 段 / 历史 5 段｜在聊：讨论晚饭吃什么｜我上次在这说话：2 小时前
 ```
 
 群聊被点名时注入的唤醒通知：
@@ -113,7 +113,7 @@ git clone https://github.com/Kalospacer/astrbot_plugin_astrmia
 
 | 配置项 | 默认值 | 说明 |
 |---|---|---|
-| `read_channel_image_enabled` | `true` | 识图开关，作用于 read_channel 与话题概括 |
+| `read_channel_image_enabled` | `true` | 识图开关，在 `read_channel` 与点名时按需识图；话题概括仅复用已有缓存 |
 | `vision_provider_ids` | `[]` | 识图兜底模型链，核心未配置图片转述模型时按顺序尝试 |
 | `image_keep_days` | `3` | 图片留底天数，供 `read_image` 回看；`0` 不存档 |
 
@@ -123,12 +123,11 @@ git clone https://github.com/Kalospacer/astrbot_plugin_astrmia
 
 | 配置项 | 默认值 | 说明 |
 |---|---|---|
-| `topic_options.min_unread` | `5` | 触发阈值（未读条数） |
 | `topic_options.cooldown_sec` | `180` | 触发冷却秒数，失败的尝试同样计入 |
 | `topic_options.max_chars` | `24` | 话题摘要字数上限 |
 | `topic_options.line_max_chars` | `120` | 单条消息截断字数 |
 | `topic_options.timeout_sec` | `10` | 模型请求超时秒数 |
-| `topic_options.segment_msg_count` | `25` | 分段消息条数 |
+| `topic_options.segment_msg_count` | `25` | 分段消息条数（攒满整段才触发概括） |
 | `topic_options.segment_rows_per_page` | `10` | 分段目录每页条数 |
 | `topic_options.segment_backfill_max` | `5` | 积压时单次补充分段上限 |
 
@@ -149,8 +148,8 @@ git clone https://github.com/Kalospacer/astrbot_plugin_astrmia
 |---|---|---|
 | `vision_options.image_max` | `6` | 单次新识别图片上限 |
 | `vision_options.wait_sec` | `8` | 读群等待识图秒数，超时转入后台 |
-| `vision_options.brief_max_chars` | `80` | 消息行描述截断字数 |
-| `vision_options.read_max_chars` | `500` | read_image 返回字数上限，0 表示不限制 |
+| `vision_options.brief_max_chars` | `80` | 消息行描述截断字数（自动剥离 Markdown 标题壳） |
+| `vision_options.read_max_chars` | `500` | `read_image` 单次返回字数上限（超长支持 `offset` 续读），0 表示不限制 |
 | `vision_options.timeout_sec` | `60` | 单次识图请求超时秒数 |
 | `vision_options.cache_ttl_days` | `30` | 描述缓存保留天数 |
 

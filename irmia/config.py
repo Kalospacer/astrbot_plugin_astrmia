@@ -66,7 +66,6 @@ class IrmiaConfig:
     mention_inline_limit: int = 20
     light_provider_id: str = ""
     topic_summary_enabled: bool = True
-    topic_min_unread: int = 5
     topic_cooldown_sec: int = 180
     heartbeat_enabled: bool = True
     heartbeat_provider_id: str = ""
@@ -229,7 +228,6 @@ def load_irmia_config(raw: dict[str, Any] | None) -> IrmiaConfig:
         mention_inline_limit=_group_int("display_options", "inline_limit", 20),
         light_provider_id=str(cfg.get("light_provider_id", "") or "").strip(),
         topic_summary_enabled=bool(cfg.get("topic_summary_enabled", True)),
-        topic_min_unread=_group_int("topic_options", "min_unread", 5),
         topic_cooldown_sec=_group_int("topic_options", "cooldown_sec", 180, minimum=0),
         heartbeat_enabled=bool(cfg.get("heartbeat_enabled", True)),
         heartbeat_provider_id=str(cfg.get("heartbeat_provider_id", "") or "").strip(),

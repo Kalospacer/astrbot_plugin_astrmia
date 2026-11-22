@@ -258,3 +258,62 @@ def test_format_ago_buckets() -> None:
     assert format_ago(5 * 60) == "5 分钟前"
     assert format_ago(3 * 3600 + 1200) == "3 小时前"
     assert format_ago(2 * 86400 + 3600) == "2 天前"
+
+
+def test_session_list_shows_unread_and_no_new_for_private_and_group(
+    tmp_path: Path,
+) -> None:
+    """私聊与群聊统一按真实未读条数显示「未读 N 条」或「无新消息」。"""
+
+    async def _run() -> None:
+        store = IrmiaStore(tmp_path / "unread_hint")
+        await store.open()
+        priv_umo = "aiocqhttp:FriendMessage:10001"
+        grp_umo = "aiocqhttp:GroupMessage:20002"
+        try:
+            # 建档消息（建档即已读）
+            await store.ensure_message_recorded(
+                umo=priv_umo, sender_id="10001", sender_name="老哥", text="首条私聊", ts=100.0
+            )
+            await store.ensure_message_recorded(
+                umo=grp_umo,
+                sender_id="20001",
+                sender_name="群友",
+                text="首条群聊",
+                ts=101.0,
+                group_name="摸鱼群",
+            )
+            # 再来 2 条私聊新消息、3 条群聊新消息
+            for i in range(2):
+                await store.ensure_message_recorded(
+                    umo=priv_umo, sender_id="10001", sender_name="老哥", text=f"私聊新{i}", ts=110.0 + i
+                )
+            for i in range(3):
+                await store.ensure_message_recorded(
+                    umo=grp_umo, sender_id="20001", sender_name="群友", text=f"群聊新{i}", ts=120.0 + i
+                )
+
+            assert store.count_unread(priv_umo, (await store.get_session_state(priv_umo))["read_up_to_id"]) == 2
+            sessions = await store.list_sessions(0.0, include_unread=True)
+            rendered = render_session_list(sessions, lambda s: s.group_name or "老哥")
+            lines = {line.split("｜sid ")[1].split("｜")[0]: line for line in rendered.splitlines()[1:]}
+            assert "｜未读 2 条｜" in lines[priv_umo]
+            assert "｜未读 3 条｜" in lines[grp_umo]
+
+            # 私聊标已读、群聊读完后全部切换为「无新消息」
+            await store.mark_session_all_read(priv_umo)
+            await execute_read_channel(store=store, sid=grp_umo, limit=20)
+            sessions_after = await store.list_sessions(0.0, include_unread=True)
+            rendered_after = render_session_list(
+                sessions_after, lambda s: s.group_name or "老哥"
+            )
+            lines_after = {
+                line.split("｜sid ")[1].split("｜")[0]: line
+                for line in rendered_after.splitlines()[1:]
+            }
+            assert "｜无新消息｜" in lines_after[priv_umo]
+            assert "｜无新消息｜" in lines_after[grp_umo]
+        finally:
+            await store.close()
+
+    asyncio.run(_run())

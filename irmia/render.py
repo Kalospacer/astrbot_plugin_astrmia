@@ -121,12 +121,14 @@ def build_self_brief(
 
     group_rules = (
         [
-            f"- 会话清单显示分段数量，点名通知显示未读条数。每 {segment_msg_count} 条消息为一段，附一句摘要。",
+            "- 会话清单每行标有「未读 N 条」或「无新消息」；标「无新消息」的会话无需调用 read_channel 重复检查。",
+            f"- 会话清单同时显示分段数量，每 {segment_msg_count} 条消息为一段，附一句摘要。",
             f"- 未唤醒你的群消息仅记为未读，不触发唤醒。清单中显示分段数与 {topic_max_chars} 字以内的话题摘要。",
             "- 使用 read_channel(sid=...) 查看。",
         ]
         if topic_summary_enabled
         else [
+            "- 会话清单每行标有「未读 N 条」或「无新消息」；标「无新消息」的会话无需调用 read_channel 重复检查。",
             "- 未唤醒你的群消息仅记为未读，不触发唤醒。",
             "- 使用 read_channel(sid=...) 查看最近原文，传 before=<消息编号> 向前翻页。",
         ]
@@ -172,6 +174,7 @@ def render_session_list(
         kind_label = CHAT_TYPE_LABELS.get(mtype, mtype or "会话")
         where = resolve_where_fn(s)
         when = format_local_stamp(s.last_ts, tz_name)
+        unread_part = f"｜未读 {s.unread} 条" if s.unread > 0 else "｜无新消息"
         segment_part = (
             f"｜今天 {s.today_segments} 段 / 历史 {s.history_segments} 段"
             if show_topic and is_group_umo(s.umo)
@@ -184,7 +187,7 @@ def render_session_list(
             else "｜我还没在这说过话"
         )
         lines.append(
-            f"- {kind_label} · {where}｜sid {s.umo}｜最后 {when}{segment_part}{topic_part}{my_last_part}"
+            f"- {kind_label} · {where}｜sid {s.umo}｜最后 {when}{unread_part}{segment_part}{topic_part}{my_last_part}"
         )
     rest = (
         f"\n（还有 {len(sessions) - max_items} 个更早的会话没列出来。）"

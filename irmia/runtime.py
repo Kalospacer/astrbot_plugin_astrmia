@@ -408,6 +408,7 @@ class IrmiaRuntime:
             msg_id=int(kwargs["msg_id"]),
             index=int(kwargs.get("index", 1)),
             question=str(kwargs.get("question") or "").strip(),
+            offset=max(0, int(kwargs.get("offset", 0) or 0)),
             keep_days=cfg.image_keep_days,
         )
 
@@ -836,7 +837,9 @@ class IrmiaRuntime:
             include_brief_in_extra = True
 
         if hasattr(req, "extra_user_content_parts"):
-            sessions = await self.store.list_sessions(self.day_start_ts(cfg))
+            sessions = await self.store.list_sessions(
+                self.day_start_ts(cfg), include_unread=True
+            )
             tz = self.tz_name()
             parts = []
             if include_brief_in_extra:

@@ -652,28 +652,6 @@ class IrmiaStore:
                 )
                 conn.commit()
 
-    async def update_topic_text(
-        self, umo: str, topic: str, updated_at: float | None = None
-    ) -> None:
-        """只更新那一句「在聊」，不动总结游标；没攒满一段的尾巴用它。"""
-        now_ts = updated_at if updated_at is not None else time.time()
-        async with self._lock:
-            with self._db_lock:
-                conn = self._ensure_conn()
-                self._known_umos.add(umo)
-                conn.execute(
-                    """
-                    INSERT INTO session_state(umo, topic, topic_updated_at, updated_at)
-                    VALUES(?, ?, ?, ?)
-                    ON CONFLICT(umo) DO UPDATE SET
-                        topic=excluded.topic,
-                        topic_updated_at=excluded.topic_updated_at,
-                        updated_at=excluded.updated_at
-                    """,
-                    (umo, topic.strip(), now_ts, now_ts),
-                )
-                conn.commit()
-
     async def append_topic_segment(
         self,
         umo: str,
@@ -758,9 +736,7 @@ class IrmiaStore:
             return int(row["m"]) if row and row["m"] is not None else 0
 
     def count_unread(self, umo: str, read_up_to_id: int) -> int:
-        """数游标之后实时抓到的非 bot 消息，补账不算。"""
-        if not is_group_umo(umo):
-            return 0
+        """数游标之后实时抓到的非 bot 消息（群聊与私聊统一口径），补账不算。"""
         with self._db_lock:
             db_conn, table = self._select_source_for_umo(umo)
             return self._count_unread_on(db_conn, table, umo, read_up_to_id)
@@ -933,7 +909,7 @@ class IrmiaStore:
 
                         unread = (
                             self._count_unread_on(dbc, table, umo, read_up_to_id)
-                            if include_unread and is_group
+                            if include_unread
                             else 0
                         )
 
