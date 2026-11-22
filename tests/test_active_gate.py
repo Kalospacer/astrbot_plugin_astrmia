@@ -123,8 +123,8 @@ def _gate_with(responses: list[httpx.Response]) -> tuple[ActiveAttentionGate, Re
 
 
 @pytest.mark.asyncio
-async def test_jev_protocol_bearer_noul_and_429_retry(monkeypatch) -> None:
-    """jev：/v1/systemone + Bearer（留空回退环境变量）+ noul，429 后按 retry-after 重试。"""
+async def test_systemone_protocol_bearer_noul_and_429_retry(monkeypatch) -> None:
+    """systemone：/v1/systemone + Bearer（留空读环境变量）+ noul，429 后按 retry-after 重试。"""
     monkeypatch.setenv("TYPESAFE_API_KEY", "env-key")
     gate, rec = _gate_with(
         [
@@ -132,23 +132,29 @@ async def test_jev_protocol_bearer_noul_and_429_retry(monkeypatch) -> None:
             httpx.Response(200, json={"answers": {"should_reply": {"noul": 0.8}}}),
         ]
     )
-    result = await gate.decide(_evidence(), _cfg(protocol="jev"), provider_resolver=_no_provider)
+    cfg = _cfg(
+        mode="decision_api",
+        protocol="systemone",
+        api_base="https://gateway.example",
+        model="custom-systemone-model",
+    )
+    result = await gate.decide(_evidence(), cfg, provider_resolver=_no_provider)
     await gate.close()
 
     assert result.triggered is True and result.probability == 0.8
     assert len(rec.requests) == 2
     req = rec.requests[-1]
-    assert str(req.url) == "https://api.typesafe.ai/v1/systemone"
+    assert str(req.url) == "https://gateway.example/v1/systemone"
     assert req.headers["authorization"] == "Bearer env-key"
     body = json.loads(req.content)
-    assert body["model"] == "jev-1.13.0"
+    assert body["model"] == "custom-systemone-model"
     assert body["questions"]["should_reply"]["type"] == "noul"
     assert body["state"]["new_messages"][0]["text"] == "吃的牛肉饭"
 
 
 @pytest.mark.asyncio
-async def test_gemini_decision_protocol_with_kept_image(tmp_path) -> None:
-    """gemini_decision：/v1beta/decisions + x-goog-api-key + noul（兼容反代 value），缺图自动跳过。"""
+async def test_gemini_decisions_protocol_with_kept_image(tmp_path) -> None:
+    """gemini_decisions：/v1beta/decisions + x-goog-api-key + noul（兼容反代 value），缺图自动跳过。"""
     image = tmp_path / "kept.jpg"
     image.write_bytes(b"jpeg-bytes")
     missing = tmp_path / "cleaned_up.jpg"
@@ -158,7 +164,13 @@ async def test_gemini_decision_protocol_with_kept_image(tmp_path) -> None:
             httpx.Response(200, json={"answers": {"should_reply": {"value": 0.85, "confidence": 0.9}}}),
         ]
     )
-    cfg = _cfg(protocol="gemini_decision", api_key="g-key", api_base="https://proxy.example/")
+    cfg = _cfg(
+        mode="decision_api",
+        protocol="gemini_decisions",
+        api_key="g-key",
+        api_base="https://proxy.example/",
+        model="gemini-decision-1",
+    )
     result = await gate.decide(
         _evidence([str(missing), str(image)]), cfg, provider_resolver=_no_provider
     )
@@ -183,8 +195,8 @@ async def test_gemini_decision_protocol_with_kept_image(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_openai_decision_protocol_predicate_array(tmp_path) -> None:
-    """openai_decision：/v1/decisions + Bearer + predicate 数组 + probability，图片走 input_image。"""
+async def test_openai_decisions_protocol_predicate_array(tmp_path) -> None:
+    """openai_decisions：/v1/decisions + Bearer + predicate 数组 + probability，图片走 input_image。"""
     image = tmp_path / "kept.jpg"
     image.write_bytes(b"img")
     gate, rec = _gate_with(
@@ -195,16 +207,22 @@ async def test_openai_decision_protocol_predicate_array(tmp_path) -> None:
             )
         ]
     )
-    cfg = _cfg(protocol="openai_decision", api_key="o-key", model="gpt-custom")
+    cfg = _cfg(
+        mode="decision_api",
+        protocol="openai_decisions",
+        api_base="https://proxy.example",
+        api_key="o-key",
+        model="custom-decision-model",
+    )
     result = await gate.decide(_evidence([str(image)]), cfg, provider_resolver=_no_provider)
     await gate.close()
 
     assert result.triggered is True and result.probability == 0.75
     req = rec.requests[0]
-    assert str(req.url) == "https://api.openai.com/v1/decisions"
+    assert str(req.url) == "https://proxy.example/v1/decisions"
     assert req.headers["authorization"] == "Bearer o-key"
     body = json.loads(req.content)
-    assert body["model"] == "gpt-custom"
+    assert body["model"] == "custom-decision-model"
     assert body["questions"] == [
         {"name": "should_reply", "type": "predicate", "instructions": body["questions"][0]["instructions"]}
     ]
@@ -226,24 +244,28 @@ async def test_http_protocol_failures_fail_closed(responses) -> None:
     """HTTP 错误、越界概率、重试预算耗尽一律按不回复处理。"""
     gate, _ = _gate_with(responses)
     result = await gate.decide(
-        _evidence(), _cfg(protocol="jev", api_key="k"), provider_resolver=_no_provider
+        _evidence(),
+        _cfg(mode="decision_api", protocol="systemone", api_base="https://gw.test", api_key="k", model="m1"),
+        provider_resolver=_no_provider,
     )
     await gate.close()
     assert result.triggered is False and result.probability is None
 
 
-def test_is_active_gate_configured_no_implicit_fallback(monkeypatch) -> None:
-    """各协议均需显式配置好模型或密钥，不做隐式回退。"""
+def test_is_active_gate_configured_no_hardcoded_defaults(monkeypatch) -> None:
+    """所有模式都必须显式填齐参数，不硬编码默认模型名或地址，不做隐式回退。"""
     monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
-    assert is_active_gate_configured(_cfg(protocol="llm")) is False
-    assert is_active_gate_configured(_cfg(protocol="llm", provider_id="judge/m1")) is True
-    assert is_active_gate_configured(_cfg(protocol="gemini_decision")) is False
-    assert is_active_gate_configured(_cfg(protocol="gemini_decision", api_key="k")) is True
-    assert is_active_gate_configured(_cfg(protocol="openai_decision")) is False
-    assert is_active_gate_configured(_cfg(protocol="openai_decision", api_key="k")) is True
-    assert is_active_gate_configured(_cfg(protocol="jev")) is False
-    assert is_active_gate_configured(_cfg(protocol="jev", api_key="k")) is True
-    assert is_active_gate_configured(_cfg(window_sec=0, protocol="llm", provider_id="judge/m1")) is False
+    assert is_active_gate_configured(_cfg(mode="llm")) is False
+    assert is_active_gate_configured(_cfg(mode="llm", provider_id="judge/m1")) is True
+    assert is_active_gate_configured(_cfg(mode="decision_api", protocol="gemini_decisions", api_key="k", model="m")) is False
+    assert is_active_gate_configured(_cfg(mode="decision_api", protocol="gemini_decisions", api_base="https://a", api_key="k")) is False
+    assert is_active_gate_configured(_cfg(mode="decision_api", protocol="gemini_decisions", api_base="https://a", model="m")) is False
+    assert is_active_gate_configured(_cfg(mode="decision_api", protocol="gemini_decisions", api_base="https://a", api_key="k", model="m")) is True
+    assert is_active_gate_configured(_cfg(mode="decision_api", protocol="openai_decisions", api_base="https://a", api_key="k", model="m")) is True
+    assert is_active_gate_configured(_cfg(mode="decision_api", protocol="systemone", api_base="https://a", model="m")) is False
+    monkeypatch.setenv("TYPESAFE_API_KEY", "env-k")
+    assert is_active_gate_configured(_cfg(mode="decision_api", protocol="systemone", api_base="https://a", model="m")) is True
+    assert is_active_gate_configured(_cfg(window_sec=0, mode="llm", provider_id="judge/m1")) is False
 
 
 @pytest.mark.asyncio
@@ -284,7 +306,7 @@ async def test_llm_protocol_rubric_json_and_fail_closed(completion, expected) ->
         return _Provider()
 
     gate = ActiveAttentionGate(LOG)
-    result = await gate.decide(_evidence(), _cfg(protocol="llm"), provider_resolver=_resolve)
+    result = await gate.decide(_evidence(), _cfg(mode="llm", provider_id="judge/m"), provider_resolver=_resolve)
     assert result.triggered is expected
     assert calls[0]["system_prompt"] == LLM_JUDGE_SYSTEM_PROMPT
     assert "吃的牛肉饭" in calls[0]["prompt"] and "刚才被@对象" in calls[0]["prompt"]
@@ -339,7 +361,7 @@ async def test_active_followup_merges_into_group_wake(tmp_path) -> None:
             "contacts_map": ["114514 = 哥哥"],
             "active_options": {
                 "debounce_sec": 0,
-                "protocol": "llm",
+                "mode": "llm",
                 "provider_id": "judge/test",
             },
         },

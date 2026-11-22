@@ -183,20 +183,21 @@ git clone https://github.com/Kalospacer/astrbot_plugin_astrmia
 | `active_options.window_sec` | `300` | 发言后关注秒数，`0` 关闭 |
 | `active_options.debounce_sec` | `6.0` | 合并判定秒数，从第一条接话开始计时，不因新消息延长 |
 | `active_options.max_consecutive` | `5` | 连续跟进上限，再次被 @ 或命中关键词后清零 |
-| `active_options.protocol` | `llm` | 判定协议：`llm`、`jev`、`gemini_decision`、`openai_decision` |
-| `active_options.threshold` | `0.6` | 唤醒阈值（专用决策协议比较概率，`llm` 协议比较三维 0~4 加权归一化得分） |
-| `active_options.provider_id` | 空 | `llm` 协议使用的模型，必须显式指定，留空时不启用门卫（不回退话题或主模型） |
-| `active_options.api_base` | 空 | 专用协议服务地址，留空用官方地址 |
-| `active_options.api_key` | 空 | 专用协议密钥；`jev` 留空读取环境变量 `TYPESAFE_API_KEY` |
-| `active_options.model` | 空 | 专用协议模型名，留空用各协议默认模型 |
+| `active_options.threshold` | `0.6` | 唤醒阈值（专用决策接口比较概率，`llm` 模式比较三维 0~4 加权归一化得分） |
+| `active_options.mode` | `decision_api` | 判定模式：`decision_api`（专用决策接口）或 `llm`（AstrBot 对话模型） |
+| `active_options.provider_id` | 空 | `llm` 模式必填，显式指定 AstrBot 对话模型（留空不启用，不回退） |
+| `active_options.protocol` | `gemini_decisions` | `decision_api` 模式的接口协议：`gemini_decisions`、`systemone`、`openai_decisions`（仅决定协议格式，不绑定模型名） |
+| `active_options.api_base` | 空 | `decision_api` 模式必填，服务根地址（不含尾部接口路径，留空不启用） |
+| `active_options.api_key` | 空 | `decision_api` 模式必填，接口密钥（`systemone` 留空读取环境变量 `TYPESAFE_API_KEY`） |
+| `active_options.model` | 空 | `decision_api` 模式必填，填写目标服务支持的决策模型 ID（无默认硬编码，留空不启用） |
 
-各协议的请求方式：
+各模式 / 接口协议的请求方式：
 
-| 协议 | 请求 | 鉴权 | 图片 |
+| 模式 / 协议 | 请求 | 鉴权 | 图片 |
 |---|---|---|---|
-| `jev` | `POST {api_base}/v1/systemone` | `Authorization: Bearer` | 仅复用已有识图描述 |
-| `gemini_decision` | `POST {api_base}/v1beta/decisions` | `x-goog-api-key` | 附带最多 3 张留底图 |
-| `openai_decision` | `POST {api_base}/v1/decisions` | `Authorization: Bearer` | 附带最多 3 张留底图 |
+| `systemone` | `POST {api_base}/v1/systemone` | `Authorization: Bearer` | 仅复用已有识图描述 |
+| `gemini_decisions` | `POST {api_base}/v1beta/decisions` | `x-goog-api-key` | 附带最多 3 张留底图 |
+| `openai_decisions` | `POST {api_base}/v1/decisions` | `Authorization: Bearer` | 附带最多 3 张留底图 |
 | `llm` | AstrBot 模型 `text_chat` | AstrBot 配置 | 仅复用已有识图描述 |
 
 判定超时上限为 `min(topic_options.timeout_sec, 6)` 秒；请求失败时不唤醒。

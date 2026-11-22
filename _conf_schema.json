@@ -333,43 +333,72 @@
         "default": 5,
         "hint": "连续多少轮没有 @ 的跟进唤醒后停止跟进，直到再次被 @ 或命中关键词。"
       },
-      "protocol": {
-        "description": "判定协议",
-        "type": "string",
-        "default": "llm",
-        "options": ["llm", "jev", "gemini_decision", "openai_decision"],
-        "hint": "llm 使用 AstrBot 已配置的模型；jev 调用 TypeSafe /v1/systemone；gemini_decision 调用 Gemini /v1beta/decisions；openai_decision 调用 OpenAI /v1/decisions。后两者会附带已留底的图片。"
-      },
       "threshold": {
         "description": "唤醒阈值",
         "type": "float",
         "default": 0.6,
-        "hint": "唤醒阈值，取值 0~1。专用决策协议比较判定概率，llm 协议比较三维 0~4 分加权归一化得分。"
+        "hint": "唤醒阈值，取值 0~1。专用决策接口比较判定概率，AstrBot 对话模型模式比较三维 0~4 分加权归一化得分。"
+      },
+      "mode": {
+        "description": "判定模式",
+        "type": "string",
+        "default": "decision_api",
+        "options": ["decision_api", "llm"],
+        "labels": ["专用决策接口", "AstrBot 对话模型（三维 0-4 评分）"],
+        "hint": "选择专用决策接口或 AstrBot 已配置的对话模型；必需参数未填全时门卫直接不启用。"
       },
       "provider_id": {
         "description": "判定模型",
         "type": "string",
         "default": "",
         "_special": "select_provider",
-        "hint": "仅 llm 协议使用。必须显式指定模型，留空时不启用门卫（不会回退话题模型或主模型）。"
+        "condition": {
+          "mode": "llm"
+        },
+        "hint": "必须显式指定 AstrBot 对话模型，留空时不启用门卫（不会回退话题模型或主模型）。"
+      },
+      "protocol": {
+        "description": "接口协议",
+        "type": "string",
+        "default": "gemini_decisions",
+        "options": ["gemini_decisions", "systemone", "openai_decisions"],
+        "labels": [
+          "Gemini Decisions（POST /v1beta/decisions · x-goog-api-key）",
+          "SystemOne（POST /v1/systemone · Bearer）",
+          "OpenAI Decisions（POST /v1/decisions · Bearer）"
+        ],
+        "condition": {
+          "mode": "decision_api"
+        },
+        "hint": "仅决定请求路径、请求体格式与鉴权方式，与模型名解耦；Gemini/OpenAI Decisions 会自动附带留底图。"
       },
       "api_base": {
         "description": "接口地址",
         "type": "string",
         "default": "",
-        "hint": "jev、gemini_decision、openai_decision 协议的服务地址，可填官方或兼容的反向代理地址。留空使用官方地址。"
+        "condition": {
+          "mode": "decision_api"
+        },
+        "hint": "必填。服务根地址（不含尾部接口路径，支持官方或任意兼容反代）；留空时不启用门卫。"
       },
       "api_key": {
         "description": "接口密钥",
         "type": "string",
         "default": "",
-        "hint": "专用判定协议的 API key。jev 留空时读取环境变量 TYPESAFE_API_KEY。"
+        "secret": true,
+        "condition": {
+          "mode": "decision_api"
+        },
+        "hint": "必填。对应决策接口的 API key（SystemOne 留空时读取环境变量 TYPESAFE_API_KEY）；留空时不启用门卫。"
       },
       "model": {
-        "description": "判定模型名",
+        "description": "模型名",
         "type": "string",
         "default": "",
-        "hint": "专用判定协议的模型名。留空时 jev 用 jev-1.13.0，gemini_decision 用 gemini-decision-1，openai_decision 用 gpt-6-luna。"
+        "condition": {
+          "mode": "decision_api"
+        },
+        "hint": "必填。按所用服务填写实际支持的决策模型 ID，不做默认模型名硬编码；留空时不启用门卫。"
       }
     }
   }

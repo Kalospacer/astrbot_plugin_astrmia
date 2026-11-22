@@ -103,7 +103,8 @@ class IrmiaConfig:
     active_window_sec: int = 300
     active_debounce_sec: float = 6.0
     active_max_consecutive: int = 5
-    active_protocol: str = "llm"
+    active_mode: str = "decision_api"
+    active_protocol: str = "gemini_decisions"
     active_threshold: float = 0.6
     active_provider_id: str = ""
     active_api_base: str = ""
@@ -111,8 +112,9 @@ class IrmiaConfig:
     active_model: str = ""
 
 
-#: 活跃注意力门卫支持的判定协议
-ACTIVE_PROTOCOLS = ("jev", "gemini_decision", "openai_decision", "llm")
+#: 活跃注意力门卫支持的判定模式与专用接口协议
+ACTIVE_MODES = ("decision_api", "llm")
+ACTIVE_PROTOCOLS = ("gemini_decisions", "systemone", "openai_decisions")
 
 
 def parse_contacts_map(raw_list: Any) -> dict[str, str]:
@@ -227,9 +229,13 @@ def load_irmia_config(raw: dict[str, Any] | None) -> IrmiaConfig:
     def _active_str(key: str) -> str:
         return str(active.get(key, "") or "").strip()
 
+    mode = _active_str("mode").lower()
+    if mode not in ACTIVE_MODES:
+        mode = "decision_api"
+
     protocol = _active_str("protocol").lower()
     if protocol not in ACTIVE_PROTOCOLS:
-        protocol = "llm"
+        protocol = "gemini_decisions"
 
     raw_keywords = cfg.get("mention_keywords", [])
     keywords = (
@@ -309,6 +315,7 @@ def load_irmia_config(raw: dict[str, Any] | None) -> IrmiaConfig:
             active.get("debounce_sec", 6.0), default=6.0, min_value=0.0
         ),
         active_max_consecutive=_group_int("active_options", "max_consecutive", 5),
+        active_mode=mode,
         active_protocol=protocol,
         active_threshold=min(
             1.0,

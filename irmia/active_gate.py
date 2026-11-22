@@ -2,7 +2,7 @@
 
 状态只存内存：`_record_bot_speech` 激活并续期窗口，显式唤醒清零连续放行计数。
 活跃期内未点名的群消息先按固定截止窗攒批（首条开窗，新消息不续期），
-批次领头者再交给 jev / gemini_decision / openai_decision / llm 四种协议之一判定。
+批次领头者再按配置的模式与接口协议（systemone / gemini_decisions / openai_decisions / llm）判定。
 任何网络或协议异常一律按「不回复」处理。
 """
 
@@ -41,19 +41,8 @@ MAX_DECISION_IMAGES = 3
 BACKGROUND_ROWS = 4
 EVIDENCE_FETCH_ROWS = 12
 RETRY_STATUSES = (429, 529)
-MULTIMODAL_PROTOCOLS = ("gemini_decision", "openai_decision")
+MULTIMODAL_PROTOCOLS = ("gemini_decisions", "openai_decisions")
 AT_TARGET_RE = re.compile(r"\[@([^\]\s]+)\]")
-
-DEFAULT_API_BASES = {
-    "jev": "https://api.typesafe.ai",
-    "gemini_decision": "https://generativelanguage.googleapis.com",
-    "openai_decision": "https://api.openai.com",
-}
-DEFAULT_MODELS = {
-    "jev": "jev-1.13.0",
-    "gemini_decision": "gemini-decision-1",
-    "openai_decision": "gpt-6-luna",
-}
 
 DECISION_INSTRUCTIONS = (
     "You are deciding whether the bot should follow up in a group chat shortly after it spoke. "
@@ -151,14 +140,17 @@ LLM_JUDGE_SYSTEM_PROMPT = _render_llm_system_prompt()
 
 
 def is_active_gate_configured(cfg: IrmiaConfig) -> bool:
-    """判断活跃注意力门卫是否已显式配好判定模型或密钥，不做隐式回退。"""
+    """判断活跃注意力门卫是否已显式配好全部必需参数，不做默认模型名或地址猜测。"""
     if cfg.active_window_sec <= 0:
         return False
-    if cfg.active_protocol == "llm":
+    if cfg.active_mode == "llm":
         return bool(cfg.active_provider_id)
-    if cfg.active_protocol == "jev":
-        return bool(cfg.active_api_key or os.environ.get("TYPESAFE_API_KEY", "").strip())
-    return bool(cfg.active_api_key)
+    api_key = (
+        cfg.active_api_key or os.environ.get("TYPESAFE_API_KEY", "").strip()
+        if cfg.active_protocol == "systemone"
+        else cfg.active_api_key
+    )
+    return bool(cfg.active_api_base and api_key and cfg.active_model)
 
 
 @dataclass
@@ -397,7 +389,10 @@ class ActiveAttentionGate:
             [r for r in rows if r.id < new_rows[0].id] if new_rows else rows
         )[-BACKGROUND_ROWS:]
 
-        multimodal = cfg.active_protocol in MULTIMODAL_PROTOCOLS
+        multimodal = (
+            cfg.active_mode == "decision_api"
+            and cfg.active_protocol in MULTIMODAL_PROTOCOLS
+        )
         captions: dict[int, list[str | None]] = {}
         if not multimodal and captioner is not None and cfg.read_channel_image_enabled and new_rows:
             captions = await captioner.caption_rows(new_rows, wait_sec=0, max_new=0)
@@ -464,36 +459,40 @@ class ActiveAttentionGate:
         *,
         provider_resolver: Callable[[], Awaitable[Any]],
     ) -> DecisionResult:
-        """按配置的协议判定，超时上限 min(light_timeout_sec, 6)；任何异常都按不回复处理。"""
-        protocol = cfg.active_protocol
+        """按配置的模式与接口协议判定，超时上限 min(light_timeout_sec, 6)；任何异常都按不回复处理。"""
+        label = "llm" if cfg.active_mode == "llm" else cfg.active_protocol
         timeout = min(float(cfg.light_timeout_sec), DECISION_TIMEOUT_CAP_SEC)
         try:
-            if protocol == "llm":
+            if cfg.active_mode == "llm":
                 call = self._call_llm(evidence, provider_resolver)
             else:
                 handler = {
-                    "jev": self._call_jev,
-                    "gemini_decision": self._call_gemini_decision,
-                    "openai_decision": self._call_openai_decision,
-                }[protocol]
+                    "systemone": self._call_systemone,
+                    "gemini_decisions": self._call_gemini_decisions,
+                    "openai_decisions": self._call_openai_decisions,
+                }[cfg.active_protocol]
                 call = handler(evidence, cfg, timeout)
             probability = await asyncio.wait_for(call, timeout=timeout)
         except Exception as exc:  # noqa: BLE001 - 判定失败一律不放行
-            self.logger.warning(f"[IRMIA 活跃门卫] {protocol} 判定失败，按不回复处理: {exc!r}")
+            self.logger.warning(f"[IRMIA 活跃门卫] {label} 判定失败，按不回复处理: {exc!r}")
             return DecisionResult(triggered=False)
 
         triggered = probability >= cfg.active_threshold
         self.logger.info(
-            f"[IRMIA 活跃门卫] {protocol} 判定 p={probability:.2f} 阈值 {cfg.active_threshold:.2f}，"
+            f"[IRMIA 活跃门卫] {label} 判定 p={probability:.2f} 阈值 {cfg.active_threshold:.2f}，"
             f"新消息 {len(evidence.new_messages)} 条 → {'放行' if triggered else '不放行'}"
         )
         return DecisionResult(triggered=triggered, probability=probability)
 
     def _endpoint(self, cfg: IrmiaConfig, path: str) -> tuple[str, str]:
-        """拼官方路径并取模型名；api_base / model 留空时用各协议默认值。"""
-        base = cfg.active_api_base or DEFAULT_API_BASES[cfg.active_protocol]
-        model = cfg.active_model or DEFAULT_MODELS[cfg.active_protocol]
-        return f"{base.rstrip('/')}{path}", model
+        """校验显式配置的接口地址与模型名，并拼接对应协议的规范路径。"""
+        base = cfg.active_api_base.rstrip("/")
+        model = cfg.active_model.strip()
+        if not base:
+            raise RuntimeError("未配置 active_options.api_base")
+        if not model:
+            raise RuntimeError("未配置 active_options.model")
+        return f"{base}{path}", model
 
     async def _encoded_images(self, paths: list[str]) -> list[str]:
         """读留底图并转 base64；留底图统一是 JPEG，单张缺失时跳过以免打断判定。"""
@@ -507,13 +506,13 @@ class ActiveAttentionGate:
             encoded.append(base64.b64encode(raw).decode("ascii"))
         return encoded
 
-    async def _call_jev(
+    async def _call_systemone(
         self, evidence: DecisionEvidence, cfg: IrmiaConfig, timeout: float
     ) -> float:
-        """TypeSafe Jev：POST /v1/systemone，Bearer 鉴权，读 noul 概率。"""
+        """SystemOne 协议：POST /v1/systemone，Bearer 鉴权，读 noul 概率。"""
         api_key = cfg.active_api_key or os.environ.get("TYPESAFE_API_KEY", "").strip()
         if not api_key:
-            raise RuntimeError("未配置 Jev API key（active_options.api_key 或 TYPESAFE_API_KEY）")
+            raise RuntimeError("未配置 SystemOne API key（active_options.api_key 或 TYPESAFE_API_KEY）")
         url, model = self._endpoint(cfg, "/v1/systemone")
         payload = {
             "model": model,
@@ -531,12 +530,12 @@ class ActiveAttentionGate:
         )
         return _checked_probability(data["answers"]["should_reply"]["noul"], "noul")
 
-    async def _call_gemini_decision(
+    async def _call_gemini_decisions(
         self, evidence: DecisionEvidence, cfg: IrmiaConfig, timeout: float
     ) -> float:
-        """Gemini Decisions：POST /v1beta/decisions，x-goog-api-key 鉴权，读 noul 概率（兼容反代 value）。"""
+        """Gemini Decisions 协议：POST /v1beta/decisions，x-goog-api-key 鉴权，读 noul 概率（兼容反代 value）。"""
         if not cfg.active_api_key:
-            raise RuntimeError("未配置 gemini_decision 的 API key")
+            raise RuntimeError("未配置 Gemini Decisions API key（active_options.api_key）")
         url, model = self._endpoint(cfg, "/v1beta/decisions")
         images = await self._encoded_images(evidence.image_paths)
         text = evidence.to_text()
@@ -565,12 +564,12 @@ class ActiveAttentionGate:
         field = "noul" if "noul" in ans else "value"
         return _checked_probability(ans[field], field)
 
-    async def _call_openai_decision(
+    async def _call_openai_decisions(
         self, evidence: DecisionEvidence, cfg: IrmiaConfig, timeout: float
     ) -> float:
-        """OpenAI Decisions：POST /v1/decisions，Bearer 鉴权，answers 数组里取 should_reply 的 probability。"""
+        """OpenAI Decisions 协议：POST /v1/decisions，Bearer 鉴权，answers 数组里取 should_reply 的 probability。"""
         if not cfg.active_api_key:
-            raise RuntimeError("未配置 openai_decision 的 API key")
+            raise RuntimeError("未配置 OpenAI Decisions API key（active_options.api_key）")
         url, model = self._endpoint(cfg, "/v1/decisions")
         images = await self._encoded_images(evidence.image_paths)
         text = evidence.to_text()
