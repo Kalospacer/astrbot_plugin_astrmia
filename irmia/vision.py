@@ -207,6 +207,51 @@ class VisionStore:
             self._conn.commit()
             return row["text"]
 
+    def find_descs_many(
+        self,
+        sha256s: Sequence[str],
+        kind: str,
+        question: str = "",
+        allow_brief: bool = True,
+    ) -> dict[str, str]:
+        """按原图哈希批量查找描述缓存，命中条目合并为一次更新与提交。"""
+        unique_shas = list(dict.fromkeys(sha for sha in sha256s if sha))
+        if not unique_shas:
+            return {}
+        kinds = [kind]
+        if kind == "caption" and allow_brief:
+            kinds.append("brief")
+        sha_marks = ",".join("?" for _ in unique_shas)
+        kind_marks = ",".join("?" for _ in kinds)
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT sha256, kind, text FROM image_desc "
+                f"WHERE sha256 IN ({sha_marks}) AND kind IN ({kind_marks}) AND question=?",
+                (*unique_shas, *kinds, question),
+            ).fetchall()
+            if not rows:
+                return {}
+            # 当 kind 与 brief 同时存在时，优先使用主 kind
+            by_sha_kind = {(r["sha256"], r["kind"]): r["text"] for r in rows}
+            hits: dict[str, str] = {}
+            now = time.time()
+            updates: list[tuple[float, str, str, str]] = []
+            for sha in unique_shas:
+                for candidate in kinds:
+                    text = by_sha_kind.get((sha, candidate))
+                    if text is not None:
+                        hits[sha] = text
+                        updates.append((now, sha, candidate, question))
+                        break
+            if updates:
+                self._conn.executemany(
+                    "UPDATE image_desc SET last_hit_at=?, hit_count=hit_count+1 "
+                    "WHERE sha256=? AND kind=? AND question=?",
+                    updates,
+                )
+                self._conn.commit()
+            return hits
+
     def put_desc(
         self,
         sha256: str,

@@ -103,7 +103,8 @@ def test_read_channel_skips_segment_dir_when_disabled(
             assert "段 1，25 条" in restored and "原文第 1 条" in restored
             assert "原文第 30 条" not in restored
 
-            for index in range(31, 51):
+            # 尾部保留窗口默认 10 条：补 30 条后 26..50 凑成一整段，51..60 留作原文
+            for index in range(31, 61):
                 await store.ensure_message_recorded(umo=UMO, text=f"新增 {index}")
             provider = SimpleNamespace(
                 text_chat=AsyncMock(
@@ -186,7 +187,10 @@ def test_incoming_skips_summarize_when_disabled(
             if at_bot:
                 req = FakeReq(prompt=event.message_str)
                 await runtime.on_llm_request(event, req)
-                assert ("那边在聊：旧话题" in req.prompt) is enabled
+                notice_text = "\n".join(
+                    [req.prompt, *(p.text for p in req.extra_user_content_parts[:-1])]
+                )
+                assert ("那边在聊：旧话题" in notice_text) is enabled
                 injected = req.extra_user_content_parts[-1].text
                 assert ("在聊：旧话题" in injected) is enabled
                 if not enabled:

@@ -272,6 +272,18 @@ class Captioner:
             eligible[0].umo,
             [row.platform_message_id for row in eligible],
         )
+        all_shas = [
+            kept.sha256
+            for row in eligible
+            for kept in kept_by_message.get(row.platform_message_id, [])
+        ]
+        cached_descs = (
+            await asyncio.to_thread(
+                self.vstore.find_descs_many, all_shas, KIND_FULL, ""
+            )
+            if all_shas
+            else {}
+        )
         cache_only = max_new <= 0
         captions: dict[int, list[str | None]] = {}
         pending: list[tuple[ChannelMessageRow, KeptImage, int]] = []
@@ -295,9 +307,7 @@ class Captioner:
                 slot_idx = bare_slot_by_idx.get(kept.idx)
                 if slot_idx is None:
                     continue
-                hit = await asyncio.to_thread(
-                    self.vstore.find_desc, kept.sha256, KIND_FULL, ""
-                )
+                hit = cached_descs.get(kept.sha256)
                 if hit:
                     slots[slot_idx] = hit
                 elif not cache_only:
@@ -376,13 +386,44 @@ class Captioner:
         return f"{chunk}\n（已显示第 {start + 1}~{total} / 共 {total} 字，已到末尾）"
 
 
+def truncate_message_body(text: str, max_chars: int) -> str:
+    """只按纯文本字数截断单条消息，图片占位符整块保留，不会被拦腰截断。
+
+    图片占位符不计入字数；纯文本超出 max_chars 后补一个省略号，
+    之后只保留剩余的图片占位符，保证识图描述槽位顺序不变。max_chars<=0 原样返回。
+    """
+    if max_chars <= 0:
+        return text
+    pieces: list[str] = []
+    budget = max_chars
+    cut = False
+    cursor = 0
+    for match in [*ANY_IMAGE_RE.finditer(text), None]:
+        plain = text[cursor : match.start()] if match else text[cursor:]
+        if not cut:
+            if len(plain) > budget:
+                pieces.append(plain[:budget].rstrip() + ELLIPSIS)
+                cut = True
+            else:
+                pieces.append(plain)
+                budget -= len(plain)
+        if match is not None:
+            pieces.append(match.group(0))
+            cursor = match.end()
+    return "".join(pieces)
+
+
 def render_with_captions(
     text: str,
     captions: list[str | None] | None,
     max_chars: int = 0,
+    *,
+    text_max_chars: int = 0,
 ) -> str:
-    """替换裸图片占位符并把描述裁到 max_chars；为空时保留原占位符。"""
+    """替换裸图片占位符并把描述裁到 max_chars；可选先按纯文本截断正文再替换图片描述。"""
     rendered = str(text or "")
+    if text_max_chars > 0:
+        rendered = truncate_message_body(rendered, text_max_chars)
     if captions is not None:
         slots = iter(captions)
 

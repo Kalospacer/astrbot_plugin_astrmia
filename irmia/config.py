@@ -97,6 +97,22 @@ class IrmiaConfig:
     wake_max_steps: int = 32
     session_list_max: int = 8
     quote_preview_chars: int = 40
+    takeover_cron: bool = True
+    attention_window: int = 10
+    msg_max_chars: int = 150
+    active_window_sec: int = 300
+    active_debounce_sec: float = 6.0
+    active_max_consecutive: int = 5
+    active_protocol: str = "llm"
+    active_threshold: float = 0.6
+    active_provider_id: str = ""
+    active_api_base: str = ""
+    active_api_key: str = ""
+    active_model: str = ""
+
+
+#: 活跃注意力门卫支持的判定协议
+ACTIVE_PROTOCOLS = ("jev", "gemini_decision", "openai_decision", "llm")
 
 
 def parse_contacts_map(raw_list: Any) -> dict[str, str]:
@@ -205,6 +221,16 @@ def load_irmia_config(raw: dict[str, Any] | None) -> IrmiaConfig:
             cfg.get("group_batch_window_sec", 3), default=3.0, min_value=0.0
         )
 
+    active = cfg.get("active_options")
+    active = active if isinstance(active, dict) else {}
+
+    def _active_str(key: str) -> str:
+        return str(active.get(key, "") or "").strip()
+
+    protocol = _active_str("protocol").lower()
+    if protocol not in ACTIVE_PROTOCOLS:
+        protocol = "llm"
+
     raw_keywords = cfg.get("mention_keywords", [])
     keywords = (
         [str(w).strip() for w in raw_keywords if str(w).strip()]
@@ -273,4 +299,23 @@ def load_irmia_config(raw: dict[str, Any] | None) -> IrmiaConfig:
         wake_max_steps=_group_int("heartbeat_options", "max_steps", 32),
         session_list_max=_group_int("display_options", "session_list_max", 8),
         quote_preview_chars=_group_int("display_options", "quote_preview_chars", 40),
+        takeover_cron=bool(cfg.get("takeover_cron", True)),
+        attention_window=_group_int(
+            "display_options", "attention_window", 10, minimum=0
+        ),
+        msg_max_chars=_group_int("display_options", "msg_max_chars", 150, minimum=0),
+        active_window_sec=_group_int("active_options", "window_sec", 300, minimum=0),
+        active_debounce_sec=_coerce_number(
+            active.get("debounce_sec", 6.0), default=6.0, min_value=0.0
+        ),
+        active_max_consecutive=_group_int("active_options", "max_consecutive", 5),
+        active_protocol=protocol,
+        active_threshold=min(
+            1.0,
+            _coerce_number(active.get("threshold", 0.6), default=0.6, min_value=0.0),
+        ),
+        active_provider_id=_active_str("provider_id"),
+        active_api_base=_active_str("api_base").rstrip("/"),
+        active_api_key=_active_str("api_key"),
+        active_model=_active_str("model"),
     )

@@ -858,6 +858,19 @@ class IrmiaStore:
                 conn = self._ensure_conn()
                 state_rows = conn.execute("SELECT * FROM session_state").fetchall()
                 states = {str(r["umo"]): dict(r) for r in state_rows}
+                seg_counts: dict[str, tuple[int, int]] = {}
+                if day_start_ts is not None:
+                    for sr in conn.execute(
+                        "SELECT umo, "
+                        "SUM(CASE WHEN end_ts>=? THEN 1 ELSE 0 END) AS today_cnt, "
+                        "SUM(CASE WHEN end_ts<? THEN 1 ELSE 0 END) AS hist_cnt "
+                        "FROM topic_segments GROUP BY umo",
+                        (day_start_ts, day_start_ts),
+                    ).fetchall():
+                        seg_counts[str(sr["umo"])] = (
+                            int(sr["today_cnt"] or 0),
+                            int(sr["hist_cnt"] or 0),
+                        )
 
                 def _collect_from_table(
                     dbc: sqlite3.Connection, table: str, seen_umos: set[str]
@@ -866,7 +879,7 @@ class IrmiaStore:
                     try:
                         agg_rows = dbc.execute(
                             f"""
-                            SELECT m.umo, m.platform_id, m.message_type, m.session_id,
+                            SELECT m.id AS max_id, m.umo, m.platform_id, m.message_type, m.session_id,
                                    m.sender_id, m.sender_name, m.sender_card, m.text, m.ts,
                                    stats.total_cnt, stats.live_cnt, stats.my_last_ts
                             FROM {table} m
@@ -907,24 +920,16 @@ class IrmiaStore:
                         eff_mtype = mtype or str(r["message_type"] or "")
                         is_group = "group" in eff_mtype.lower()
 
+                        max_id = int(r["max_id"] or 0)
                         unread = (
                             self._count_unread_on(dbc, table, umo, read_up_to_id)
-                            if include_unread
+                            if include_unread and max_id > read_up_to_id
                             else 0
                         )
 
-                        today_segments = 0
-                        history_segments = 0
-                        if is_group and day_start_ts is not None:
-                            seg_row = conn.execute(
-                                "SELECT "
-                                "SUM(CASE WHEN end_ts>=? THEN 1 ELSE 0 END) AS today_cnt, "
-                                "SUM(CASE WHEN end_ts<? THEN 1 ELSE 0 END) AS hist_cnt "
-                                "FROM topic_segments WHERE umo=?",
-                                (day_start_ts, day_start_ts, umo),
-                            ).fetchone()
-                            today_segments = int(seg_row["today_cnt"] or 0) if seg_row else 0
-                            history_segments = int(seg_row["hist_cnt"] or 0) if seg_row else 0
+                        today_segments, history_segments = (
+                            seg_counts.get(umo, (0, 0)) if is_group else (0, 0)
+                        )
 
                         out.append(
                             SessionSummary(

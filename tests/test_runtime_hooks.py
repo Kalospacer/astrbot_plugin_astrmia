@@ -242,19 +242,27 @@ def test_runtime_end_to_end_flow(tmp_path: Path) -> None:
             prompt="清漪快来帮我看看这道题", image_urls=["http://example.com/a.jpg"]
         )
         await rt.on_llm_request(grp_mention, req)
-        # prompt 被替换为内嵌通知卡，原图被收起，conversation 切换到 master_cid_001，身份保持原生 member
+        # prompt 只落盘触发事实，前情放进临时块；原图被收起，conversation 切换到 master_cid_001，身份保持原生 member
         notice = grp_mention.get_extra("irmia_mention_notice")
-        assert isinstance(notice, str) and "提到了你" in notice
-        assert "清漪快来帮我看看这道题" in notice
-        assert "已读" in notice
+        assert "提到了你（哥哥）" in notice.permanent_prompt
+        assert "清漪快来帮我看看这道题" in notice.permanent_prompt
+        assert "sid aiocqhttp:GroupMessage:888888" in notice.permanent_prompt
+        assert "今天天气真不错" not in notice.permanent_prompt
+        assert "无需再次 read_channel" not in notice.permanent_prompt
         assert grp_mention.get_extra("irmia_repeat_reads") == {}
-        assert req.prompt == notice
+        assert req.prompt == notice.permanent_prompt
         assert req.image_urls == []
         assert req.conversation.cid == "master_cid_001"
         assert req.contexts == [{"role": "user", "content": "主脑历史第一句"}]
         assert grp_mention.role == "member"
-        assert len(req.extra_user_content_parts) == 1
-        injected_text = req.extra_user_content_parts[0].text
+        assert len(req.extra_user_content_parts) == 2
+        temp_part = req.extra_user_content_parts[0]
+        assert temp_part._no_save is True
+        assert temp_part.text == notice.temp_context
+        assert "今天天气真不错" in temp_part.text
+        assert "已读并更新水位，无需再次 read_channel" in temp_part.text
+        assert "before=" not in temp_part.text and "是否回复由你决定" in temp_part.text
+        injected_text = req.extra_user_content_parts[1].text
         assert "外部会话" in injected_text
         assert "快乐开黑群" in injected_text
 

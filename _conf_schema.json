@@ -41,6 +41,12 @@
     "default": false,
     "hint": "本轮已通过 send_message_to_user 向当前会话发送过消息时，丢弃模型末尾直接输出的文本，避免重复发送。模型单独输出 [SILENT] 的静默行为不受影响。"
   },
+  "takeover_cron": {
+    "description": "定时任务接管",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后 AstrBot 定时任务唤醒改在全局共享记忆上执行，使用自主唤醒模型，结束后把 [CronJob] 小结写回共享记忆。关闭或未绑定主会话时交回 AstrBot 原生流程。"
+  },
   "heartbeat_enabled": {
     "description": "自主唤醒",
     "type": "bool",
@@ -52,7 +58,7 @@
     "type": "string",
     "default": "",
     "_special": "select_provider",
-    "hint": "唤醒对话轮与唤醒小结共用的模型。留空时使用主会话默认模型；指定的模型不存在时回退默认模型并记录日志。",
+    "hint": "唤醒对话轮、唤醒小结与接管的定时任务共用的模型。留空时使用主会话默认模型；指定的模型不存在时回退默认模型并记录日志。",
     "condition": {
       "heartbeat_enabled": true
     }
@@ -290,6 +296,80 @@
         "type": "int",
         "default": 20,
         "hint": "点名通知附带上下文时最多包含的消息条数。"
+      },
+      "attention_window": {
+        "description": "最新消息保留条数",
+        "type": "int",
+        "default": 10,
+        "hint": "后台分段时始终保留最新的这么多条原文不切段；未归档消息达到「分段消息条数 + 本值」才触发概括。"
+      },
+      "msg_max_chars": {
+        "description": "单条消息显示字数",
+        "type": "int",
+        "default": 150,
+        "hint": "read_channel 与点名通知中单条消息纯文本的显示上限，超出部分以省略号代替，图片描述不受影响。0 表示不截断。"
+      }
+    }
+  },
+  "active_options": {
+    "description": "活跃对话跟进",
+    "type": "object",
+    "items": {
+      "window_sec": {
+        "description": "发言后关注秒数",
+        "type": "int",
+        "default": 300,
+        "hint": "机器人在群里发言后的这段时间内，没带 @ 的接话也会交给判定模型决定是否唤醒。0 表示关闭。"
+      },
+      "debounce_sec": {
+        "description": "合并判定秒数",
+        "type": "float",
+        "default": 6.0,
+        "hint": "第一条接话到达后等待该时长，期间的消息合并为一次判定；窗口不因新消息延长。"
+      },
+      "max_consecutive": {
+        "description": "连续跟进上限",
+        "type": "int",
+        "default": 5,
+        "hint": "连续多少轮没有 @ 的跟进唤醒后停止跟进，直到再次被 @ 或命中关键词。"
+      },
+      "protocol": {
+        "description": "判定协议",
+        "type": "string",
+        "default": "llm",
+        "options": ["llm", "jev", "gemini_decision", "openai_decision"],
+        "hint": "llm 使用 AstrBot 已配置的模型；jev 调用 TypeSafe /v1/systemone；gemini_decision 调用 Gemini /v1beta/decisions；openai_decision 调用 OpenAI /v1/decisions。后两者会附带已留底的图片。"
+      },
+      "threshold": {
+        "description": "唤醒阈值",
+        "type": "float",
+        "default": 0.6,
+        "hint": "判定概率达到该值才唤醒，取值 0~1。"
+      },
+      "provider_id": {
+        "description": "判定模型",
+        "type": "string",
+        "default": "",
+        "_special": "select_provider",
+        "hint": "仅 llm 协议使用。留空时使用话题概括模型。"
+      },
+      "api_base": {
+        "description": "接口地址",
+        "type": "string",
+        "default": "",
+        "hint": "jev、gemini_decision、openai_decision 协议的服务地址，可填官方或兼容的反向代理地址。留空使用官方地址。"
+      },
+      "api_key": {
+        "description": "接口密钥",
+        "type": "string",
+        "default": "",
+        "hint": "专用判定协议的 API key。jev 留空时读取环境变量 TYPESAFE_API_KEY。"
+      },
+      "model": {
+        "description": "判定模型名",
+        "type": "string",
+        "default": "",
+        "hint": "专用判定协议的模型名。留空时 jev 用 jev-1.13.0，gemini_decision 用 gemini-decision-1，openai_decision 用 gpt-6-luna。"
       }
     }
   }

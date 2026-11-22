@@ -112,7 +112,11 @@ class TopicSummarizer:
         *,
         force_for_mention: bool = False,
     ) -> str | None:
-        """从上次断开处按整段切分并概括，凑满一整段才调模型，一次最多补 segment_backfill_max 段。"""
+        """从上次断开处按整段切分并概括，尾部始终留 attention_window 条原文不切。
+
+        攒够「一整段 + 保留窗口」才调模型，一次最多补 segment_backfill_max 段；
+        刚聊完的最新几条留在未成段区，不会被提前压进摘要。
+        """
         if umo in self._running_umos:
             st = await self.store.get_session_state(umo)
             return str(st.get("topic") or "") or None
@@ -122,21 +126,23 @@ class TopicSummarizer:
         topic_updated_at = float(st.get("topic_updated_at", 0.0) or 0.0)
         latest_topic = str(st.get("topic", "") or "") or None
 
-        window = max(1, cfg.segment_msg_count)
-        budget = max(1, cfg.segment_backfill_max)
-        batch = self.store.fetch_messages(
-            umo, after_id=topic_to_id, limit=window * budget, asc=True
-        )
-        if len(batch) < window:
-            return latest_topic
-
         now_ts = time.time()
-        # 非点名强制触发时，按上次实际尝试时间检查冷却（失败的尝试同样计入冷却）
+        # 非点名强制触发时，先检查冷却，避免冷却期内每条群消息都拉取上百条完整记录
         if not force_for_mention:
             attempted_raw = await self.store.get_kv(f"topic_attempted_at:{umo}", "")
             attempted_at = float(attempted_raw or topic_updated_at)
             if now_ts - attempted_at < cfg.topic_cooldown_sec:
                 return latest_topic
+
+        window = max(1, cfg.segment_msg_count)
+        reserve = max(0, cfg.attention_window)
+        budget = max(1, cfg.segment_backfill_max)
+        batch = self.store.fetch_messages(
+            umo, after_id=topic_to_id, limit=window * budget + reserve, asc=True
+        )
+        if len(batch) < window + reserve:
+            return latest_topic
+        eligible = batch[:-reserve] if reserve > 0 else batch
 
         self._running_umos.add(umo)
         try:
@@ -151,7 +157,7 @@ class TopicSummarizer:
             await self.store.set_kv(f"topic_attempted_at:{umo}", str(now_ts))
 
             for i in range(budget):
-                rows = batch[i * window : (i + 1) * window]
+                rows = eligible[i * window : (i + 1) * window]
                 if len(rows) < window:
                     break
 

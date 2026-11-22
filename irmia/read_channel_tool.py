@@ -1,7 +1,8 @@
-"""read_channel 工具：段目录、段展开、游标翻页。"""
+"""read_channel 工具：段目录、段展开、游标翻页，以及点名通知共用的读群摘要。"""
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Callable, Sequence
 
 from pydantic import Field
@@ -11,7 +12,12 @@ from .config import IrmiaConfig
 from .inbox import mentions_keyword
 from .render import format_short_time
 from .store import ChannelMessageRow, IrmiaStore, is_group_umo, parse_umo
-from .vision_describe import Captioner, captions_for, render_with_captions
+from .vision_describe import (
+    Captioner,
+    captions_for,
+    render_with_captions,
+    truncate_message_body as truncate_message_body,
+)
 
 try:
     from astrbot.api import FunctionTool
@@ -26,6 +32,8 @@ READ_CHANNEL_PAGE_SIZE = 50
 READ_CHANNEL_MAX_LIMIT = 100
 READ_CHANNEL_SEGMENT_PAGE = IrmiaConfig.segment_rows_per_page
 READ_CHANNEL_MENTION_CONTEXT = 10
+#: 默认读未读时，紧挨第一条未读之前带上的已读前文条数
+READ_CHANNEL_CONTEXT_BRIDGE = 2
 
 SELF_SPEAK_LABEL = "（我）"
 MENTION_ROW_MARK = "▶ "
@@ -38,16 +46,16 @@ def read_channel_description(
 ) -> str:
     """按话题开关生成读群工具描述，开启时保留段目录说明。"""
     reading_mode = (
-        f"不带参数返回最近的段目录，一段是 {segment_msg_count} 条消息加一句总结；"
-        "没攒够一段的群给最新原文。"
+        f"不带参数返回未读的段目录，一段是 {segment_msg_count} 条消息加一句总结，"
+        "外加全部尚未成段的原文。"
         "传 segment=<编号> 展开某段原文，传 before=<消息编号> 往前翻历史。"
         if summary_enabled
-        else "不带参数返回最近的原文，传 before=<消息编号> 往前翻历史。"
+        else "不带参数返回全部未读原文和紧挨着的两条前文，传 before=<消息编号> 往前翻历史。"
     )
     return (
         "读某个群或私聊的消息，也包括你自己在那边说过的话（行首写着（我））。"
         f"{reading_mode}"
-        "读一次即清空该会话未读，翻页不改已读。"
+        "读一次即清空该会话未读，翻页不改已读。单条过长的消息会截断显示。"
         "要说话用 send_message_to_user。"
         "图片带一句描述，细节用 read_image，传 sid 和行首的 #编号。"
     )
@@ -80,6 +88,157 @@ def _paging_hint(next_before: int, more: bool) -> str:
     return "已经到最早的记录了"
 
 
+def render_channel_rows(
+    rows: Sequence[ChannelMessageRow],
+    *,
+    store: IrmiaStore,
+    mentioned_set: set[int],
+    captions: dict[int, list[str | None]],
+    tz_name: str,
+    contacts_map: dict[str, str],
+    image_brief_max_chars: int,
+    msg_max_chars: int,
+) -> list[str]:
+    """把消息渲染成 `[时刻 #编号] 发言人: 正文` 行；先截纯文本，再替换图片描述。"""
+    lines: list[str] = []
+    for r in rows:
+        stamp = format_short_time(r.ts, tz_name)
+        who = (
+            SELF_SPEAK_LABEL
+            if r.is_bot
+            else store.resolve_person_name(
+                r.sender_id, r.sender_name, r.sender_card, contacts_map
+            )
+        )
+        prefix = (
+            MENTION_ROW_MARK if ((not r.is_bot) and r.id in mentioned_set) else ""
+        )
+
+        raw_text = (r.text or "").replace("\r\n", "\n").strip()
+        raw_text = render_with_captions(
+            raw_text,
+            captions_for(r, captions),
+            image_brief_max_chars,
+            text_max_chars=msg_max_chars,
+        )
+        body = raw_text or "[空消息]"
+        lines.append(f"{prefix}[{stamp} #{r.id}] {who}: {body}")
+    return lines
+
+
+@dataclass
+class MentionDigest:
+    """点名通知用的读群结果：触发原话与前情分开渲染。"""
+
+    trigger_lines: list[str]
+    context_lines: list[str]
+    oldest_shown_id: int
+    leftover: int
+    unread: int = 0
+    has_more: bool = False
+
+
+async def collect_mention_digest(
+    *,
+    store: IrmiaStore,
+    sid: str,
+    trigger_pmids: Sequence[str] = (),
+    max_rows: int = READ_CHANNEL_DEFAULT_LIMIT,
+    contacts_map: dict[str, str] | None = None,
+    mention_keywords: Sequence[str] = (),
+    bot_self_ids: set[str] | None = None,
+    tz_name: str = "Asia/Shanghai",
+    captioner: Captioner | None = None,
+    caption_max_new: int = 6,
+    image_brief_max_chars: int = IrmiaConfig.image_brief_max_chars,
+    msg_max_chars: int = IrmiaConfig.msg_max_chars,
+) -> MentionDigest | None:
+    """挑出触发消息与其前情并推进已读；图片只取缓存、不等待识别。
+
+    触发消息是平台消息编号命中 trigger_pmids 的行，或未读里点到她的行；
+    都找不到时（账本稍慢）退回最新一条外部消息。每条触发消息带前面
+    READ_CHANNEL_MENTION_CONTEXT 条前情，总数不超过 max_rows。
+    """
+    self_ids = bot_self_ids or set()
+    cmap = contacts_map or {}
+    st = await store.get_session_state(sid)
+    prev_read_id = int(st.get("read_up_to_id", 0) or 0)
+    pool_limit = max(max_rows * 4, 100)
+    pool = store.fetch_messages(sid, limit=pool_limit)
+    if not pool:
+        return None
+
+    pmids = {str(p) for p in trigger_pmids if p}
+    trigger_idx = [
+        idx
+        for idx, m in enumerate(pool)
+        if not m.is_bot
+        and (
+            (m.platform_message_id and m.platform_message_id in pmids)
+            or (m.id > prev_read_id and _is_row_mentioning_me(m, self_ids, mention_keywords))
+        )
+    ]
+    if not trigger_idx:
+        latest = next(
+            (idx for idx in range(len(pool) - 1, -1, -1) if not pool[idx].is_bot),
+            len(pool) - 1,
+        )
+        trigger_idx = [latest]
+
+    picked: set[int] = set()
+    for t_idx in trigger_idx:
+        picked.update(range(max(0, t_idx - READ_CHANNEL_MENTION_CONTEXT), t_idx + 1))
+    shown_idx = sorted(picked)[-max(1, max_rows) :]
+    trigger_set = set(trigger_idx)
+    shown = [pool[i] for i in shown_idx]
+    triggers = [pool[i] for i in shown_idx if i in trigger_set]
+    context = [pool[i] for i in shown_idx if i not in trigger_set]
+
+    captions = (
+        await captioner.caption_rows(shown, wait_sec=0, max_new=caption_max_new)
+        if captioner is not None
+        else {}
+    )
+    render_opts = dict(
+        store=store,
+        captions=captions,
+        tz_name=tz_name,
+        contacts_map=cmap,
+        image_brief_max_chars=image_brief_max_chars,
+        msg_max_chars=msg_max_chars,
+    )
+    context_mentions = {
+        r.id for r in context if _is_row_mentioning_me(r, self_ids, mention_keywords)
+    }
+    unread_total = store.count_unread(sid, prev_read_id)
+    if shown_idx[0] > 0:
+        has_more = True
+    elif len(pool) < pool_limit:
+        has_more = False
+    else:
+        has_more = bool(store.fetch_messages(sid, before_id=shown[0].id, limit=1))
+
+    digest = MentionDigest(
+        trigger_lines=render_channel_rows(triggers, mentioned_set=set(), **render_opts),
+        context_lines=render_channel_rows(
+            context, mentioned_set=context_mentions, **render_opts
+        ),
+        oldest_shown_id=shown[0].id,
+        leftover=max(
+            0,
+            unread_total
+            - sum(1 for m in shown if not m.is_bot and m.id > prev_read_id),
+        ),
+        unread=unread_total,
+        has_more=has_more,
+    )
+
+    store.clear_pending_bot_speeches(sid)
+    shown_up_to = max((m.id for m in shown if not m.is_bot), default=prev_read_id)
+    await store.update_read_state(sid, read_up_to_id=max(prev_read_id, shown_up_to))
+    return digest
+
+
 async def execute_read_channel(
     *,
     store: IrmiaStore,
@@ -93,13 +252,15 @@ async def execute_read_channel(
     mention_keywords: Sequence[str] = (),
     bot_self_ids: set[str] | None = None,
     called_sid_this_turn: str | None = None,
-    digest_only: bool = False,
     tz_name: str = "Asia/Shanghai",
     repeat_counter: dict[str, int] | None = None,
     captioner: Captioner | None = None,
     caption_wait_sec: float = 8,
     caption_max_new: int = 6,
     image_brief_max_chars: int = IrmiaConfig.image_brief_max_chars,
+    msg_max_chars: int = IrmiaConfig.msg_max_chars,
+    attention_window: int = IrmiaConfig.attention_window,
+    segment_msg_count: int = IrmiaConfig.segment_msg_count,
 ) -> str:
     """执行 read_channel 核心逻辑（纯业务函数，便于直接单测与工具调用）。"""
     target_sid = str(sid or "").strip()
@@ -116,6 +277,12 @@ async def execute_read_channel(
     )
     raw_lim = default_lim if limit is None else int(limit)
     eff_limit = max(1, min(READ_CHANNEL_MAX_LIMIT, raw_lim))
+    # 未显式传 limit 时放宽到「保留窗口 + 一整段」，保证未成段的未读一条不漏
+    unread_cap = (
+        eff_limit
+        if limit is not None
+        else max(eff_limit, max(0, attention_window) + max(1, segment_msg_count))
+    )
     self_ids = bot_self_ids or set()
     cmap = contacts_map or {}
 
@@ -136,28 +303,16 @@ async def execute_read_channel(
         mentioned_set: set[int],
         captions: dict[int, list[str | None]],
     ) -> list[str]:
-        lines: list[str] = []
-        for r in rows:
-            stamp = format_short_time(r.ts, tz_name)
-            who = (
-                SELF_SPEAK_LABEL
-                if r.is_bot
-                else store.resolve_person_name(
-                    r.sender_id, r.sender_name, r.sender_card, cmap
-                )
-            )
-            prefix = (
-                MENTION_ROW_MARK
-                if ((not r.is_bot) and r.id in mentioned_set)
-                else ""
-            )
-            raw_text = (r.text or "").replace("\r\n", "\n").strip()
-            raw_text = render_with_captions(
-                raw_text, captions_for(r, captions), image_brief_max_chars
-            )
-            body = raw_text or "[空消息]"
-            lines.append(f"{prefix}[{stamp} #{r.id}] {who}: {body}")
-        return lines
+        return render_channel_rows(
+            rows,
+            store=store,
+            mentioned_set=mentioned_set,
+            captions=captions,
+            tz_name=tz_name,
+            contacts_map=cmap,
+            image_brief_max_chars=image_brief_max_chars,
+            msg_max_chars=msg_max_chars,
+        )
 
     async def _captions(
         rows: Sequence[ChannelMessageRow],
@@ -167,31 +322,6 @@ async def execute_read_channel(
         return await captioner.caption_rows(
             rows, wait_sec=caption_wait_sec, max_new=caption_max_new
         )
-
-    def _mention_digest(
-        pool: Sequence[ChannelMessageRow],
-        own_trigger_idx: int | None,
-        max_rows: int,
-    ) -> tuple[list[ChannelMessageRow], set[int]]:
-        """挑出叫了你的行，每条带上前面几条上下文。"""
-        trigger_idx: list[int] = []
-        for idx, m in enumerate(pool):
-            if idx == own_trigger_idx:
-                trigger_idx.append(idx)
-            elif m.id > prev_read_id and _is_row_mentioning_me(
-                m, self_ids, mention_keywords
-            ):
-                trigger_idx.append(idx)
-        if not trigger_idx:
-            shown = pool[-max_rows:]
-            return shown, _mentioned_ids(shown)
-
-        picked: set[int] = set()
-        for t_idx in trigger_idx:
-            start = max(0, t_idx - READ_CHANNEL_MENTION_CONTEXT)
-            picked.update(range(start, t_idx + 1))
-        shown = [pool[i] for i in sorted(picked)][-max_rows:]
-        return shown, _mentioned_ids(shown)
 
     async def _render_block(
         shown: Sequence[ChannelMessageRow], mentioned_set: set[int]
@@ -332,15 +462,19 @@ async def execute_read_channel(
     if repeat_counter is not None:
         repeat_counter[target_sid] = repeat_counter.get(target_sid, 0) + 1
 
-    # 点名摘要走自己的挑选规则，不进段目录
-    if digest_only:
-        shown, mentioned_set = _mention_digest(pool, own_trigger_idx, eff_limit)
-        store.clear_pending_bot_speeches(target_sid)
-        shown_up_to = max((m.id for m in shown if not m.is_bot), default=prev_read_id)
-        await store.update_read_state(
-            target_sid, read_up_to_id=max(prev_read_id, shown_up_to)
+    def _unread_window() -> list[ChannelMessageRow]:
+        """全部未读加紧挨着的两条前文；积压超过 unread_cap 时只留最新的。"""
+        start = next(
+            (i for i, m in enumerate(pool) if not m.is_bot and m.id > prev_read_id),
+            None,
         )
-        return await _render_block(shown, mentioned_set)
+        if own_trigger_idx is not None:
+            start = own_trigger_idx if start is None else min(start, own_trigger_idx)
+        if start is None:
+            return pool[-eff_limit:]
+        if len(pool) - start > unread_cap:
+            return pool[-unread_cap:]
+        return pool[max(0, start - READ_CHANNEL_CONTEXT_BRIDGE) :]
 
     is_group = is_group_umo(target_sid)
     latest_ext_id = max((m.id for m in pool if not m.is_bot), default=newest_id)
@@ -377,19 +511,19 @@ async def execute_read_channel(
         latest_segment_end = max(int(seg["end_msg_id"]) for seg in segments)
         tail = [row for row in pool if row.id > latest_segment_end]
         if tail:
-            shown = tail[-eff_limit:]
+            shown = tail[-unread_cap:]
             out.extend(["", f"尚未成段的最近 {len(shown)} 条："])
             out.extend(
                 _render_rows(shown, _mentioned_ids(shown), await _captions(shown))
             )
-            if len(shown) == eff_limit and store.fetch_messages(
+            if len(shown) == unread_cap and store.fetch_messages(
                 target_sid, after_id=latest_segment_end, before_id=shown[0].id, limit=1
             ):
                 out.append(f"还有更早的未成段消息，{_paging_hint(shown[0].id, True)}。")
         output = "\n".join(out)
     else:
-        # 默认模式：无段兜底，给最新原文
-        shown = pool[-eff_limit:]
+        # 默认模式：无段时未传 limit 只给未读窗口，传了 limit 给最新一屏原文
+        shown = _unread_window() if limit is None else pool[-eff_limit:]
         output = await _render_block(shown, _mentioned_ids(shown))
 
     store.clear_pending_bot_speeches(target_sid)
@@ -424,8 +558,8 @@ class ReadChannelTool(FunctionTool):
                 "limit": {
                     "type": "integer",
                     "description": (
-                        f"原文条数上限，默认 {READ_CHANNEL_DEFAULT_LIMIT}，"
-                        f"翻页 {READ_CHANNEL_PAGE_SIZE}，最多 {READ_CHANNEL_MAX_LIMIT}。"
+                        "原文条数上限。不传时展示全部未读（积压过多才截断），"
+                        f"翻页默认 {READ_CHANNEL_PAGE_SIZE}，最多 {READ_CHANNEL_MAX_LIMIT}。"
                         "目录模式不受它影响。"
                     ),
                 },

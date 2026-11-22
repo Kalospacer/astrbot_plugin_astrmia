@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 
 from irmia.config import load_irmia_config
-from irmia.read_channel_tool import execute_read_channel
+from irmia.read_channel_tool import collect_mention_digest, execute_read_channel
 from irmia.store import IrmiaStore
 from irmia.topic import TopicSummarizer
 
@@ -232,12 +232,12 @@ def test_maybe_summarize_fills_gap(tmp_path: Path) -> None:
     asyncio.run(_run())
 
 
-@pytest.mark.parametrize("msg_count", [10, 24])
+@pytest.mark.parametrize("msg_count", [10, 24, 25, 34])
 @pytest.mark.parametrize("force", [False, True])
 def test_below_segment_window_skips_model_call(
     tmp_path: Path, msg_count: int, force: bool
 ) -> None:
-    """不足一整段时直接跳过，不调模型、不写尝试时间戳。"""
+    """不足「一整段 + 尾部保留窗口」（默认 35 条）时直接跳过，不调模型、不写尝试时间戳。"""
     calls = 0
 
     class _FakeProvider:
@@ -275,7 +275,7 @@ def test_below_segment_window_skips_model_call(
 
 
 def test_segment_summarizer_skips_leftover_tail(tmp_path: Path) -> None:
-    """35 条消息只切 1 个 25 条整段，剩余 10 条尾巴留待下次凑满，不再多调一次模型。"""
+    """35 条消息只切 1 个 25 条整段，最新 10 条留作保留窗口原文，不再多调一次模型。"""
     calls = 0
 
     class _FakeProvider:
@@ -399,11 +399,14 @@ def test_mention_digest_skips_segment_directory(tmp_path: Path) -> None:
             ts=1700000100.0,
         )
 
-        out = await execute_read_channel(
-            store=store, sid=UMO, digest_only=True, bot_self_ids={"123456"}
+        digest = await collect_mention_digest(
+            store=store, sid=UMO, bot_self_ids={"123456"}
         )
+        out = "\n".join([*digest.trigger_lines, *digest.context_lines])
         assert "[段 " not in out
-        assert "清漪在吗" in out
+        assert "清漪在吗" in "\n".join(digest.trigger_lines)
+        assert "清漪在吗" not in "\n".join(digest.context_lines)
+        assert (await store.get_session_state(UMO))["read_up_to_id"] == 26
         await store.close()
 
     asyncio.run(_run())
@@ -557,6 +560,32 @@ def test_maybe_summarize_aborts_tail_when_segment_fails(
             assert len(segs) == fail_on_call - 1
             st = await store.get_session_state(UMO)
             assert st["topic_to_id"] == (25 if fail_on_call == 2 else 0)
+        finally:
+            await store.close()
+
+    asyncio.run(_run())
+
+
+def test_segment_directory_shows_full_unformed_tail_without_limit(tmp_path: Path) -> None:
+    """不传 limit 时目录后面的 34 条未成段尾巴全部展示，不截断、不给翻页提示。"""
+
+    async def _run() -> None:
+        store = IrmiaStore(tmp_path / "full_tail")
+        await store.open()
+        try:
+            await _feed(store, 1, 25 + 34)
+            await store.append_topic_segment(
+                UMO,
+                start_msg_id=1,
+                end_msg_id=25,
+                start_ts=1700000001,
+                end_ts=1700000025,
+                summary="已经概括的段",
+            )
+            out = await execute_read_channel(store=store, sid=UMO)
+            assert "尚未成段的最近 34 条" in out
+            assert "第 26 条" in out and "第 59 条" in out
+            assert "还有更早的未成段消息" not in out
         finally:
             await store.close()
 

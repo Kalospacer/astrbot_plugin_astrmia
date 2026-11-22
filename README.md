@@ -13,6 +13,8 @@
 - **未读信箱**：群聊中未唤醒机器人的消息仅记为未读，不触发回复；按分段自动生成话题摘要
 - **关键词唤醒**：群消息命中配置的关键词或 @ 机器人时唤醒，通知附带命中消息与前后文
 - **自主唤醒**：空闲时按概率触发主动对话轮，可查看会话、执行待办、主动发送消息；支持夜间免打扰
+- **定时任务接管**：AstrBot 定时任务在共享记忆上执行，结束后把小结写回同一段记忆
+- **活跃对话跟进**：机器人在群里发言后的几分钟内，有人没带 @ 接话时由判定模型决定是否唤醒
 - **话题概括**：由小模型分段总结群聊，用于会话清单与 read_channel 分段目录（可关闭）
 - **群聊识图**：群内图片自动生成文字描述，供模型与 read_image 工具使用
 - **AstrHe 联动**：安装 [AstrHe](https://github.com/Kalospacer/astrbot_plugin_astrhe) 后共用聊天账本与联系人备注，未安装亦可独立使用
@@ -24,10 +26,12 @@
 | 私聊 | 始终唤醒并直接回复 |
 | 群聊 @ 机器人 | 立即唤醒，通知附带命中消息与前后文 |
 | 群聊命中关键词 | 同上 |
-| 其他群消息 | 仅记为未读，不唤醒；后台生成话题摘要 |
+| 机器人发言后 5 分钟内的群接话 | 合并 6 秒内的消息交给判定模型，判定该接话时按点名流程唤醒 |
+| 其他群消息 | 仅记为未读，不唤醒；后台生成话题摘要（始终保留最新 10 条原文不切段） |
 | 空闲达到设定区间 | 按概率自主唤醒，模型通过工具查看会话并发送消息 |
+| 定时任务到期 | 在共享记忆上执行任务，结束后写入 `[CronJob]` 小结 |
 
-模型侧提供两个工具：`read_channel`（查看会话消息与分段摘要）、`read_image`（查看消息中的图片）。
+模型侧提供两个工具：`read_channel`（查看会话消息与分段摘要）、`read_image`（查看消息中的图片）。不带参数调用 `read_channel` 时返回全部未读和紧挨着的两条前文，单条消息超过 `display_options.msg_max_chars` 字时截断显示。
 
 ## 效果示例
 
@@ -39,14 +43,22 @@
 - 群聊 · 水群｜sid aiocqhttp:GroupMessage:20002｜最后 04-15 21:08｜未读 12 条｜今天 2 段 / 历史 5 段｜在聊：讨论晚饭吃什么｜我上次在这说话：2 小时前
 ```
 
-群聊被点名时注入的唤醒通知：
+群聊被点名时，通知分两部分。触发事实写入共享记忆：
 
 ```text
-21:08，水群 里有人提到了你（是 群友A），该会话共 6 条未读。那边在聊：讨论晚饭吃什么。
-以下为命中的消息及前后文，已读并更新水位，无需再次 read_channel 该会话（sid=aiocqhttp:GroupMessage:20002）：
+[群聊 · 水群 · sid aiocqhttp:GroupMessage:20002 · 21:08 · 提到了你（群友A）]
+[21:08 #43] 群友A: 弥亚觉得呢
+```
+
+前情只在本轮可见，保存记忆时自动剥离：
+
+```text
+该会话共 6 条未读。那边在聊：讨论晚饭吃什么。
+以下为触发消息的前情，已读并更新水位，无需再次 read_channel 该会话（sid=aiocqhttp:GroupMessage:20002）：
 [21:06 #41] 群友A: 今晚吃啥
 [21:07 #42] 群友B: 火锅？
-▶ [21:08 #43] 群友A: 弥亚觉得呢
+需要更早的记录时传 before=41 往前翻（翻页不改已读）。
+是否回复由你决定。
 ```
 
 ## 安装
@@ -88,13 +100,14 @@ git clone https://github.com/Kalospacer/astrbot_plugin_astrmia
 | `group_batch_window_sec` | `3` | 消息合并等待秒数，窗口内的连续消息合并为一次对话轮；`0` 禁用合并 |
 | `mention_inline_enabled` | `true` | 点名通知附带命中的消息与前后文并标记已读 |
 | `intercept_direct_reply` | `false` | 本轮已用工具向当前会话发送过消息时，丢弃模型末尾直出文本 |
+| `takeover_cron` | `true` | 定时任务在共享记忆上执行并写回小结，使用 `heartbeat_provider_id` 模型；关闭或未绑定主会话时走 AstrBot 原生流程 |
 
 ### 自主唤醒
 
 | 配置项 | 默认值 | 说明 |
 |---|---|---|
 | `heartbeat_enabled` | `true` | 空闲时按概率周期性触发主动对话轮；关闭后仅响应 @、关键词与私聊 |
-| `heartbeat_provider_id` | 空 | 唤醒对话轮与唤醒小结共用的模型，留空使用主会话默认模型 |
+| `heartbeat_provider_id` | 空 | 唤醒对话轮、唤醒小结与接管的定时任务共用的模型，留空使用主会话默认模型 |
 | `heartbeat_prompt` | 内置文案 | 唤醒时注入的指令，支持 `{quiet_min}` 与 `{idle_ticks}` 占位符；留空或未修改默认时按是否安装 AstrHe 自动适配 |
 | `heartbeat_quiet_enabled` | `false` | 夜间免打扰，时段内暂停自主唤醒抽签 |
 | `heartbeat_quiet_start_hour` | `22` | 免打扰开始整点（0~23），晚于结束整点表示跨零点窗口 |
@@ -160,6 +173,33 @@ git clone https://github.com/Kalospacer/astrbot_plugin_astrmia
 | `display_options.session_list_max` | `8` | 会话清单最大条数 |
 | `display_options.quote_preview_chars` | `40` | 引用预览字数 |
 | `display_options.inline_limit` | `20` | 点名通知内嵌消息上限 |
+| `display_options.attention_window` | `10` | 后台分段始终保留的最新原文条数，未归档达到「分段条数 + 本值」才概括 |
+| `display_options.msg_max_chars` | `150` | 单条消息纯文本显示上限，图片描述不受影响；`0` 不截断 |
+
+#### `active_options`（活跃对话跟进）
+
+| 配置项 | 默认值 | 说明 |
+|---|---|---|
+| `active_options.window_sec` | `300` | 发言后关注秒数，`0` 关闭 |
+| `active_options.debounce_sec` | `6.0` | 合并判定秒数，从第一条接话开始计时，不因新消息延长 |
+| `active_options.max_consecutive` | `5` | 连续跟进上限，再次被 @ 或命中关键词后清零 |
+| `active_options.protocol` | `llm` | 判定协议：`llm`、`jev`、`gemini_decision`、`openai_decision` |
+| `active_options.threshold` | `0.6` | 判定概率达到该值才唤醒 |
+| `active_options.provider_id` | 空 | `llm` 协议使用的模型，留空使用话题概括模型 |
+| `active_options.api_base` | 空 | 专用协议服务地址，留空用官方地址 |
+| `active_options.api_key` | 空 | 专用协议密钥；`jev` 留空读取环境变量 `TYPESAFE_API_KEY` |
+| `active_options.model` | 空 | 专用协议模型名，留空用各协议默认模型 |
+
+各协议的请求方式：
+
+| 协议 | 请求 | 鉴权 | 图片 |
+|---|---|---|---|
+| `jev` | `POST {api_base}/v1/systemone` | `Authorization: Bearer` | 仅复用已有识图描述 |
+| `gemini_decision` | `POST {api_base}/v1beta/decisions` | `x-goog-api-key` | 附带最多 3 张留底图 |
+| `openai_decision` | `POST {api_base}/v1/decisions` | `Authorization: Bearer` | 附带最多 3 张留底图 |
+| `llm` | AstrBot 模型 `text_chat` | AstrBot 配置 | 仅复用已有识图描述 |
+
+判定超时上限为 `min(topic_options.timeout_sec, 6)` 秒；请求失败时不唤醒。
 
 ## 指令
 
