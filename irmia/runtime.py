@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from .active_gate import ActiveAttentionGate
+from .active_gate import ActiveAttentionGate, is_active_gate_configured
 from .config import (
     DEFAULT_HEARTBEAT_PROMPT,
     STANDALONE_HEARTBEAT_PROMPT,
@@ -693,7 +693,7 @@ class IrmiaRuntime:
         followup_pmids: list[str] | None = None
         caller_name = ""
         if not decision.should_wake:
-            if cfg.active_window_sec > 0 and self.active_gate.is_active(
+            if is_active_gate_configured(cfg) and self.active_gate.is_active(
                 umo, now_ts, cfg.active_max_consecutive
             ):
                 caller_name = self.store.resolve_person_name(
@@ -811,15 +811,21 @@ class IrmiaRuntime:
         result = await gate.decide(
             evidence,
             cfg,
-            provider_resolver=lambda: self.topic_summarizer.resolve_provider(
-                umo, cfg.active_provider_id or cfg.light_provider_id
-            ),
+            provider_resolver=lambda: self._resolve_active_provider(cfg.active_provider_id),
         )
         if not result.triggered or not gate.commit_auto_wake(
             umo, opened_at, time.time(), cfg.active_max_consecutive
         ):
             return None
         return [str(it["pmid"]) for it in batch if it.get("pmid")]
+
+    async def _resolve_active_provider(self, provider_id: str) -> Any:
+        """仅按显式配置的 active_options.provider_id 取判定模型，不回退话题模型或主模型。"""
+        pid = (provider_id or "").strip()
+        if not pid:
+            return None
+        getter = getattr(self.context, "get_provider_by_id", None)
+        return getter(pid) if callable(getter) else None
 
     # 钩子 2：等待 LLM 请求
 

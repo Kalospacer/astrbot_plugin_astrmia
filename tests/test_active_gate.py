@@ -16,9 +16,11 @@ import pytest
 
 from irmia.active_gate import (
     AUTO_WAKE_COOLDOWN_SEC,
+    LLM_JUDGE_SYSTEM_PROMPT,
     ActiveAttentionGate,
     DecisionEvidence,
-    parse_llm_probability,
+    is_active_gate_configured,
+    parse_llm_score,
 )
 from irmia.config import load_irmia_config
 from irmia.runtime import IrmiaRuntime
@@ -230,25 +232,50 @@ async def test_http_protocol_failures_fail_closed(responses) -> None:
     assert result.triggered is False and result.probability is None
 
 
+def test_is_active_gate_configured_no_implicit_fallback(monkeypatch) -> None:
+    """各协议均需显式配置好模型或密钥，不做隐式回退。"""
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+    assert is_active_gate_configured(_cfg(protocol="llm")) is False
+    assert is_active_gate_configured(_cfg(protocol="llm", provider_id="judge/m1")) is True
+    assert is_active_gate_configured(_cfg(protocol="gemini_decision")) is False
+    assert is_active_gate_configured(_cfg(protocol="gemini_decision", api_key="k")) is True
+    assert is_active_gate_configured(_cfg(protocol="openai_decision")) is False
+    assert is_active_gate_configured(_cfg(protocol="openai_decision", api_key="k")) is True
+    assert is_active_gate_configured(_cfg(protocol="jev")) is False
+    assert is_active_gate_configured(_cfg(protocol="jev", api_key="k")) is True
+    assert is_active_gate_configured(_cfg(window_sec=0, protocol="llm", provider_id="judge/m1")) is False
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "completion, expected",
     [
-        ('好的 {"reply": true, "probability": 0.9, "reason": "在回答"}', True),
-        ('{"reply": true}', True),
-        ('{"reply": false, "probability": 0.2}', False),
+        ('{"continuity": 4, "directedness": 4, "social": 3, "reasoning": "直接回答提问"}', True),
+        ('```json\n{"continuity": 3, "directedness": 3, "social": 2}\n```', True),
+        ('{"continuity": 0, "directedness": 0, "social": 1, "reasoning": "群友互聊"}', False),
+        ('{"continuity": 4, "directedness": 4}', False),
+        ('{"continuity": 5, "directedness": 4, "social": 4}', False),
+        ('{"reply": true, "probability": 0.99}', False),
         ("我觉得应该回", False),
         (RuntimeError("provider down"), False),
     ],
 )
-async def test_llm_protocol_json_and_fail_closed(completion, expected) -> None:
-    """llm：纯文本提示词、JSON 解析概率或 reply，异常与乱码按不回复处理。"""
-    prompts: list[str] = []
+async def test_llm_protocol_rubric_json_and_fail_closed(completion, expected) -> None:
+    """llm：system_prompt 传 0-4 五档量表，prompt 传纯 JSON 材料，缺维/越界/旧格式一律 fail-closed。"""
+    calls: list[dict[str, Any]] = []
 
     class _Provider:
-        async def text_chat(self, prompt: str, session_id: str, persist: bool):
-            assert persist is False
-            prompts.append(prompt)
+        async def text_chat(
+            self,
+            prompt: str,
+            contexts: list,
+            image_urls: list,
+            system_prompt: str,
+            session_id: str,
+            persist: bool,
+        ):
+            assert persist is False and contexts == [] and image_urls == []
+            calls.append({"prompt": prompt, "system_prompt": system_prompt})
             if isinstance(completion, Exception):
                 raise completion
             return SimpleNamespace(completion_text=completion)
@@ -259,8 +286,9 @@ async def test_llm_protocol_json_and_fail_closed(completion, expected) -> None:
     gate = ActiveAttentionGate(LOG)
     result = await gate.decide(_evidence(), _cfg(protocol="llm"), provider_resolver=_resolve)
     assert result.triggered is expected
-    assert "吃的牛肉饭" in prompts[0] and "刚才被@对象" in prompts[0]
-    assert parse_llm_probability('{"probability": 0.4}') == 0.4
+    assert calls[0]["system_prompt"] == LLM_JUDGE_SYSTEM_PROMPT
+    assert "吃的牛肉饭" in calls[0]["prompt"] and "刚才被@对象" in calls[0]["prompt"]
+    assert parse_llm_score('{"continuity": 4, "directedness": 2, "social": 0}') == pytest.approx(0.575)
 
 
 # 端到端合流
@@ -277,9 +305,28 @@ class _ToolResult:
 
 
 @pytest.mark.asyncio
-async def test_active_followup_merges_into_group_wake(tmp_path, monkeypatch) -> None:
+async def test_active_followup_merges_into_group_wake(tmp_path) -> None:
     """心跳在群里 @ 哥哥提问 → 哥哥不带 @ 回复 → 门卫放行合流，通知卡动静拆分；非活跃群零调用。"""
     ctx = FakeContext()
+    prompts: list[str] = []
+
+    class _Provider:
+        async def text_chat(
+            self,
+            prompt: str,
+            contexts: list,
+            image_urls: list,
+            system_prompt: str,
+            session_id: str,
+            persist: bool,
+        ):
+            assert persist is False and system_prompt == LLM_JUDGE_SYSTEM_PROMPT
+            prompts.append(prompt)
+            return SimpleNamespace(
+                completion_text='{"continuity": 4, "directedness": 4, "social": 4, "reasoning": "回答提问"}'
+            )
+
+    ctx.get_provider_by_id = lambda pid: _Provider() if pid == "judge/test" else None
     rt = IrmiaRuntime(
         ctx,
         {
@@ -290,22 +337,15 @@ async def test_active_followup_merges_into_group_wake(tmp_path, monkeypatch) -> 
             "image_keep_days": 0,
             "read_channel_image_enabled": False,
             "contacts_map": ["114514 = 哥哥"],
-            "active_options": {"debounce_sec": 0, "protocol": "llm"},
+            "active_options": {
+                "debounce_sec": 0,
+                "protocol": "llm",
+                "provider_id": "judge/test",
+            },
         },
         LOG,
         data_dir=tmp_path,
     )
-    prompts: list[str] = []
-
-    class _Provider:
-        async def text_chat(self, prompt: str, session_id: str, persist: bool):
-            prompts.append(prompt)
-            return SimpleNamespace(completion_text='{"reply": true, "probability": 0.9}')
-
-    async def _resolve(umo: str, provider_id: str):
-        return _Provider()
-
-    monkeypatch.setattr(rt.topic_summarizer, "resolve_provider", _resolve)
     await rt.initialize()
     try:
         # 未发言的群：O(1) 拦截，不调判定模型

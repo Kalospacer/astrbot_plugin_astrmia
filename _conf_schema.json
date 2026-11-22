@@ -344,14 +344,14 @@
         "description": "唤醒阈值",
         "type": "float",
         "default": 0.6,
-        "hint": "判定概率达到该值才唤醒，取值 0~1。"
+        "hint": "唤醒阈值，取值 0~1。专用决策协议比较判定概率，llm 协议比较三维 0~4 分加权归一化得分。"
       },
       "provider_id": {
         "description": "判定模型",
         "type": "string",
         "default": "",
         "_special": "select_provider",
-        "hint": "仅 llm 协议使用。留空时使用话题概括模型。"
+        "hint": "仅 llm 协议使用。必须显式指定模型，留空时不启用门卫（不会回退话题模型或主模型）。"
       },
       "api_base": {
         "description": "接口地址",

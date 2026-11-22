@@ -184,8 +184,8 @@ git clone https://github.com/Kalospacer/astrbot_plugin_astrmia
 | `active_options.debounce_sec` | `6.0` | 合并判定秒数，从第一条接话开始计时，不因新消息延长 |
 | `active_options.max_consecutive` | `5` | 连续跟进上限，再次被 @ 或命中关键词后清零 |
 | `active_options.protocol` | `llm` | 判定协议：`llm`、`jev`、`gemini_decision`、`openai_decision` |
-| `active_options.threshold` | `0.6` | 判定概率达到该值才唤醒 |
-| `active_options.provider_id` | 空 | `llm` 协议使用的模型，留空使用话题概括模型 |
+| `active_options.threshold` | `0.6` | 唤醒阈值（专用决策协议比较概率，`llm` 协议比较三维 0~4 加权归一化得分） |
+| `active_options.provider_id` | 空 | `llm` 协议使用的模型，必须显式指定，留空时不启用门卫（不回退话题或主模型） |
 | `active_options.api_base` | 空 | 专用协议服务地址，留空用官方地址 |
 | `active_options.api_key` | 空 | 专用协议密钥；`jev` 留空读取环境变量 `TYPESAFE_API_KEY` |
 | `active_options.model` | 空 | 专用协议模型名，留空用各协议默认模型 |
