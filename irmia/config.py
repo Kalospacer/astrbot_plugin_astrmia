@@ -14,6 +14,12 @@ DEFAULT_HEARTBEAT_PROMPT = """[自主唤醒] 距上次有人私聊或在群中�
 4. 查看会话清单，用 read_channel 检查关注的会话。有可参与的话题时用 send_message_to_user 发送一条消息，每次仅处理一件事，发送后等待。
 5. 无可执行事项，或目标联系人近期已交互过时，不发送任何消息，静默结束本轮。"""
 
+STANDALONE_HEARTBEAT_PROMPT = """[自主唤醒] 距上次有人私聊或在群中唤醒你已 {quiet_min} 分钟，本轮空闲期内第 {idle_ticks} 次唤醒。
+
+1. 查看下方会话清单，用 read_channel 检查关注或有新动态的会话。
+2. 有可自然参与的话题或想联系的对象时，用 send_message_to_user 发送一条消息；每次仅处理一件事，发送后等待。
+3. 无可执行事项，或目标联系人近期已交互过时，不发送任何消息，静默结束本轮。"""
+
 
 def _coerce_number(
     value: Any,
@@ -60,7 +66,6 @@ class IrmiaConfig:
     mention_inline_limit: int = 20
     light_provider_id: str = ""
     topic_summary_enabled: bool = True
-    topic_min_unread: int = 5
     topic_cooldown_sec: int = 180
     heartbeat_enabled: bool = True
     heartbeat_provider_id: str = ""
@@ -92,6 +97,24 @@ class IrmiaConfig:
     wake_max_steps: int = 32
     session_list_max: int = 8
     quote_preview_chars: int = 40
+    takeover_cron: bool = True
+    attention_window: int = 10
+    msg_max_chars: int = 150
+    active_window_sec: int = 300
+    active_debounce_sec: float = 6.0
+    active_max_consecutive: int = 5
+    active_mode: str = "decision_api"
+    active_protocol: str = "gemini_decisions"
+    active_threshold: float = 0.6
+    active_provider_id: str = ""
+    active_api_base: str = ""
+    active_api_key: str = ""
+    active_model: str = ""
+
+
+#: 活跃注意力门卫支持的判定模式与专用接口协议
+ACTIVE_MODES = ("decision_api", "llm")
+ACTIVE_PROTOCOLS = ("gemini_decisions", "systemone", "openai_decisions")
 
 
 def parse_contacts_map(raw_list: Any) -> dict[str, str]:
@@ -200,6 +223,20 @@ def load_irmia_config(raw: dict[str, Any] | None) -> IrmiaConfig:
             cfg.get("group_batch_window_sec", 3), default=3.0, min_value=0.0
         )
 
+    active = cfg.get("active_options")
+    active = active if isinstance(active, dict) else {}
+
+    def _active_str(key: str) -> str:
+        return str(active.get(key, "") or "").strip()
+
+    mode = _active_str("mode").lower()
+    if mode not in ACTIVE_MODES:
+        mode = "decision_api"
+
+    protocol = _active_str("protocol").lower()
+    if protocol not in ACTIVE_PROTOCOLS:
+        protocol = "gemini_decisions"
+
     raw_keywords = cfg.get("mention_keywords", [])
     keywords = (
         [str(w).strip() for w in raw_keywords if str(w).strip()]
@@ -223,7 +260,6 @@ def load_irmia_config(raw: dict[str, Any] | None) -> IrmiaConfig:
         mention_inline_limit=_group_int("display_options", "inline_limit", 20),
         light_provider_id=str(cfg.get("light_provider_id", "") or "").strip(),
         topic_summary_enabled=bool(cfg.get("topic_summary_enabled", True)),
-        topic_min_unread=_group_int("topic_options", "min_unread", 5),
         topic_cooldown_sec=_group_int("topic_options", "cooldown_sec", 180, minimum=0),
         heartbeat_enabled=bool(cfg.get("heartbeat_enabled", True)),
         heartbeat_provider_id=str(cfg.get("heartbeat_provider_id", "") or "").strip(),
@@ -246,14 +282,18 @@ def load_irmia_config(raw: dict[str, Any] | None) -> IrmiaConfig:
         read_channel_image_max=_group_int("vision_options", "image_max", 6),
         read_channel_image_wait_sec=_group_int("vision_options", "wait_sec", 8),
         image_brief_max_chars=_group_int("vision_options", "brief_max_chars", 80),
-        read_image_max_chars=_group_int("vision_options", "read_max_chars", 500),
+        read_image_max_chars=_group_int(
+            "vision_options", "read_max_chars", 500, minimum=0
+        ),
         vision_provider_ids=[
             str(p).strip()
             for p in cfg.get("vision_provider_ids", [])
             if str(p).strip()
         ],
         vision_timeout_sec=_group_int("vision_options", "timeout_sec", 60),
-        vision_cache_ttl_days=_group_int("vision_options", "cache_ttl_days", 30),
+        vision_cache_ttl_days=_group_int(
+            "vision_options", "cache_ttl_days", 30, minimum=0
+        ),
         topic_max_chars=_group_int("topic_options", "max_chars", 24),
         topic_line_max_chars=_group_int("topic_options", "line_max_chars", 120),
         segment_rows_per_page=_group_int("topic_options", "segment_rows_per_page", 10),
@@ -265,4 +305,24 @@ def load_irmia_config(raw: dict[str, Any] | None) -> IrmiaConfig:
         wake_max_steps=_group_int("heartbeat_options", "max_steps", 32),
         session_list_max=_group_int("display_options", "session_list_max", 8),
         quote_preview_chars=_group_int("display_options", "quote_preview_chars", 40),
+        takeover_cron=bool(cfg.get("takeover_cron", True)),
+        attention_window=_group_int(
+            "display_options", "attention_window", 10, minimum=0
+        ),
+        msg_max_chars=_group_int("display_options", "msg_max_chars", 150, minimum=0),
+        active_window_sec=_group_int("active_options", "window_sec", 300, minimum=0),
+        active_debounce_sec=_coerce_number(
+            active.get("debounce_sec", 6.0), default=6.0, min_value=0.0
+        ),
+        active_max_consecutive=_group_int("active_options", "max_consecutive", 5),
+        active_mode=mode,
+        active_protocol=protocol,
+        active_threshold=min(
+            1.0,
+            _coerce_number(active.get("threshold", 0.6), default=0.6, min_value=0.0),
+        ),
+        active_provider_id=_active_str("provider_id"),
+        active_api_base=_active_str("api_base").rstrip("/"),
+        active_api_key=_active_str("api_key"),
+        active_model=_active_str("model"),
     )

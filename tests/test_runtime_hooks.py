@@ -242,19 +242,27 @@ def test_runtime_end_to_end_flow(tmp_path: Path) -> None:
             prompt="清漪快来帮我看看这道题", image_urls=["http://example.com/a.jpg"]
         )
         await rt.on_llm_request(grp_mention, req)
-        # prompt 被替换为内嵌通知卡，原图被收起，conversation 切换到 master_cid_001，身份保持原生 member
+        # prompt 只落盘触发事实，前情放进临时块；原图被收起，conversation 切换到 master_cid_001，身份保持原生 member
         notice = grp_mention.get_extra("irmia_mention_notice")
-        assert isinstance(notice, str) and "提到了你" in notice
-        assert "清漪快来帮我看看这道题" in notice
-        assert "已读" in notice
+        assert "提到了你（哥哥）" in notice.permanent_prompt
+        assert "清漪快来帮我看看这道题" in notice.permanent_prompt
+        assert "sid aiocqhttp:GroupMessage:888888" in notice.permanent_prompt
+        assert "今天天气真不错" not in notice.permanent_prompt
+        assert "无需再次 read_channel" not in notice.permanent_prompt
         assert grp_mention.get_extra("irmia_repeat_reads") == {}
-        assert req.prompt == notice
+        assert req.prompt == notice.permanent_prompt
         assert req.image_urls == []
         assert req.conversation.cid == "master_cid_001"
         assert req.contexts == [{"role": "user", "content": "主脑历史第一句"}]
         assert grp_mention.role == "member"
-        assert len(req.extra_user_content_parts) == 1
-        injected_text = req.extra_user_content_parts[0].text
+        assert len(req.extra_user_content_parts) == 2
+        temp_part = req.extra_user_content_parts[0]
+        assert temp_part._no_save is True
+        assert temp_part.text == notice.temp_context
+        assert "今天天气真不错" in temp_part.text
+        assert "已读并更新水位，无需再次 read_channel" in temp_part.text
+        assert "before=" not in temp_part.text and "是否回复由你决定" in temp_part.text
+        injected_text = req.extra_user_content_parts[1].text
         assert "外部会话" in injected_text
         assert "快乐开黑群" in injected_text
 
@@ -898,5 +906,140 @@ async def test_wake_final_silent_text_is_discarded(
             assert summary.await_args.args[4] == ""
         else:
             summary.assert_not_awaited()
+    finally:
+        await rt.terminate()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "raw_prompt, has_astrhe, expect_astrhe, expect_custom",
+    [
+        ("", True, True, False),
+        ("", False, False, False),
+        ("DEFAULT", False, False, False),
+        ("自定义心跳 {quiet_min}m #{idle_ticks}", False, False, True),
+    ],
+)
+async def test_wake_prompt_adapts_to_astrhe_presence(
+    tmp_path, monkeypatch, raw_prompt, has_astrhe, expect_astrhe, expect_custom
+):
+    """未自定义心跳提示词时按是否安装 AstrHe 自动切换默认文案，自定义文案原样生效。"""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, Mock
+
+    from irmia.config import DEFAULT_HEARTBEAT_PROMPT
+    from irmia.heartbeat import HeartbeatFiring
+
+    master = "aiocqhttp:FriendMessage:114514"
+    captured: list[str] = []
+
+    class _FakeToolMgr:
+        def get_builtin_tool(self, _cls):
+            return None
+
+        def get_func(self, name: str):
+            return object() if (has_astrhe and name == "astrhe_read_todos") else None
+
+    ctx = FakeContext()
+    ctx.get_llm_tool_manager = Mock(return_value=_FakeToolMgr())
+    cfg: dict[str, Any] = {"master_umo": master, "heartbeat_enabled": False}
+    if raw_prompt == "DEFAULT":
+        cfg["heartbeat_prompt"] = DEFAULT_HEARTBEAT_PROMPT
+    elif raw_prompt:
+        cfg["heartbeat_prompt"] = raw_prompt
+
+    rt = IrmiaRuntime(
+        ctx,
+        cfg,
+        logging.getLogger("test"),
+        data_dir=tmp_path,
+    )
+    await rt.initialize()
+    try:
+        runner = SimpleNamespace(
+            step_until_done=Mock(return_value=AsyncMock()),
+            get_final_llm_resp=Mock(return_value=SimpleNamespace(completion_text="")),
+        )
+
+        async def _fake_build(**kwargs):
+            captured.append(kwargs["req"].prompt)
+            return SimpleNamespace(agent_runner=runner, reset_coro=None)
+
+        monkeypatch.setattr("astrbot.core.astr_main_agent.build_main_agent", _fake_build)
+        monkeypatch.setattr(
+            "astrbot.core.pipeline.context.call_event_hook", AsyncMock()
+        )
+        monkeypatch.setattr("astrbot.core.agent.tool.ToolSet.add_tool", Mock())
+        monkeypatch.setattr(rt, "_bind_master_conversation", AsyncMock())
+        monkeypatch.setattr(
+            "astrbot.core.provider.entities.ProviderRequest",
+            Mock(return_value=SimpleNamespace(prompt="", tool_calls_result=[])),
+        )
+
+        await rt._run_wake_turn(
+            master,
+            HeartbeatFiring(
+                quiet_seconds=120, probability=1, roll=0, idle_ticks=3, alpha=1
+            ),
+        )
+
+        assert len(captured) == 1
+        prompt = captured[0]
+        if expect_custom:
+            assert prompt == "自定义心跳 2.0m #3"
+        elif expect_astrhe:
+            assert "astrhe_read_todos" in prompt
+            assert "2.0 分钟" in prompt and "第 3 次" in prompt
+        else:
+            assert "astrhe_" not in prompt
+            assert "read_channel" in prompt and "send_message_to_user" in prompt
+            assert "2.0 分钟" in prompt and "第 3 次" in prompt
+    finally:
+        await rt.terminate()
+
+
+@pytest.mark.asyncio
+async def test_llm_request_injects_unread_status_and_brief_guidance(tmp_path):
+    """on_llm_request 注入的会话清单标明真实未读/无新消息，自述明确引导跳过无新消息会话。"""
+    master = "aiocqhttp:FriendMessage:114514"
+    grp_umo = "aiocqhttp:GroupMessage:888888"
+    ctx = FakeContext()
+    rt = IrmiaRuntime(
+        ctx,
+        {
+            "master_umo": master,
+            "heartbeat_enabled": False,
+            "group_batch_window_sec": 0,
+            "topic_summary_enabled": False,
+            "image_keep_days": 0,
+            "read_channel_image_enabled": False,
+        },
+        logging.getLogger("test"),
+        data_dir=tmp_path,
+    )
+    await rt.initialize()
+    try:
+        priv_ev = FakeEvent(master, "你好", private=True, sender_id="114514", role="admin")
+        await rt.on_incoming_event(priv_ev)
+
+        # 群聊第 1 条建档即已读，随后再进 2 条未点名未读消息
+        for idx, text in enumerate(("建档首条", "未读第一条", "未读第二条"), start=1):
+            ev = FakeEvent(grp_umo, text, private=False, at_bot=False, sender_id="222222")
+            ev.message_obj.message_id = f"grp_unread_{idx}"
+            await rt.on_incoming_event(ev)
+
+        req = FakeReq(prompt="你好")
+        req.system_prompt = ""  # type: ignore[attr-defined]
+        await rt.on_llm_request(priv_ev, req)
+
+        assert "标「无新消息」的会话无需调用 read_channel" in req.system_prompt  # type: ignore[attr-defined]
+        injected = req.extra_user_content_parts[-1].text
+        session_lines = {
+            line.split("｜sid ")[1].split("｜")[0]: line
+            for line in injected.splitlines()
+            if "｜sid " in line
+        }
+        assert "｜无新消息｜" in session_lines[master]
+        assert "｜未读 2 条｜" in session_lines[grp_umo]
     finally:
         await rt.terminate()

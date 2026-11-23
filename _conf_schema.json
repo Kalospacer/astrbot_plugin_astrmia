@@ -41,6 +41,12 @@
     "default": false,
     "hint": "本轮已通过 send_message_to_user 向当前会话发送过消息时，丢弃模型末尾直接输出的文本，避免重复发送。模型单独输出 [SILENT] 的静默行为不受影响。"
   },
+  "takeover_cron": {
+    "description": "定时任务接管",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后 AstrBot 定时任务唤醒改在全局共享记忆上执行，使用自主唤醒模型，结束后把 [CronJob] 小结写回共享记忆。关闭或未绑定主会话时交回 AstrBot 原生流程。"
+  },
   "heartbeat_enabled": {
     "description": "自主唤醒",
     "type": "bool",
@@ -52,7 +58,7 @@
     "type": "string",
     "default": "",
     "_special": "select_provider",
-    "hint": "唤醒对话轮与唤醒小结共用的模型。留空时使用主会话默认模型；指定的模型不存在时回退默认模型并记录日志。",
+    "hint": "唤醒对话轮、唤醒小结与接管的定时任务共用的模型。留空时使用主会话默认模型；指定的模型不存在时回退默认模型并记录日志。",
     "condition": {
       "heartbeat_enabled": true
     }
@@ -61,7 +67,7 @@
     "description": "自主唤醒提示词",
     "type": "text",
     "default": "[自主唤醒] 距上次有人私聊或在群中唤醒你已 {quiet_min} 分钟，本轮空闲期内第 {idle_ticks} 次唤醒。\n\n1. 核对待办与规划：规划用 astrhe_read_plan，待办用 astrhe_read_todos。选取一件当前可完成的事项执行，完成后用 astrhe_todo_update 记录；已失效的条目标记为放弃。\n2. 对话中出现的新约定用 astrhe_todo_add 记录并关联对应会话；计划变更用 astrhe_todo_edit 或 astrhe_plan_edit 更新。\n3. 暂时无法处理的事项用 astrhe_schedule 设定提醒时间，到期将自动唤醒。\n4. 查看会话清单，用 read_channel 检查关注的会话。有可参与的话题时用 send_message_to_user 发送一条消息，每次仅处理一件事，发送后等待。\n5. 无可执行事项，或目标联系人近期已交互过时，不发送任何消息，静默结束本轮。",
-    "hint": "唤醒时注入的用户指令。支持占位符 {quiet_min}（空闲分钟数）与 {idle_ticks}（本轮空闲期内唤醒次数）。留空使用内置默认。",
+    "hint": "唤醒时注入的用户指令。支持占位符 {quiet_min}（空闲分钟数）与 {idle_ticks}（本轮空闲期内唤醒次数）。留空或未修改默认时，按是否安装 AstrHe 自动选用对应内置提示词。",
     "condition": {
       "heartbeat_enabled": true
     }
@@ -110,7 +116,7 @@
     "description": "群聊识图",
     "type": "bool",
     "default": true,
-    "hint": "开启后 read_channel 与话题概括自动为图片生成文字描述，优先复用缓存。提示词与首选模型跟随 AstrBot 核心的图片转述配置。"
+    "hint": "开启后在 read_channel 与群点名时按需为图片生成文字描述并复用缓存；后台话题概括仅复用已有缓存，不主动发起新识图。提示词与首选模型跟随 AstrBot 核心的图片转述配置。"
   },
   "vision_provider_ids": {
     "description": "识图兜底模型",
@@ -135,17 +141,11 @@
       "topic_summary_enabled": true
     },
     "items": {
-      "min_unread": {
-        "description": "触发阈值（未读条数）",
-        "type": "int",
-        "default": 5,
-        "hint": "群未读消息达到该数量且冷却结束时触发一次概括。"
-      },
       "cooldown_sec": {
         "description": "触发冷却秒数",
         "type": "int",
         "default": 180,
-        "hint": "同一会话两次概括之间的最短间隔，失败的尝试同样计入。被点名的强制触发不受此限制。"
+        "hint": "同一会话两次整段概括之间的最短间隔，失败的尝试同样计入。被点名的强制触发不受此限制。"
       },
       "max_chars": {
         "description": "话题摘要字数上限",
@@ -241,7 +241,7 @@
         "description": "单次新识别图片上限",
         "type": "int",
         "default": 6,
-        "hint": "单次读群或概括最多新发起的识图请求数，缓存命中不占名额。"
+        "hint": "单次读群或点名最多新发起的识图请求数，缓存命中不占名额。"
       },
       "wait_sec": {
         "description": "等待识图秒数",
@@ -253,13 +253,13 @@
         "description": "消息行描述截断字数",
         "type": "int",
         "default": 80,
-        "hint": "read_channel 消息行内图片描述的截断字数，完整描述仍可通过 read_image 查看。"
+        "hint": "read_channel 消息行内图片描述的截断字数（展示前自动剥离 Markdown 标题符号），完整描述仍可通过 read_image 查看。"
       },
       "read_max_chars": {
-        "description": "read_image 返回字数上限",
+        "description": "read_image 单次返回字数上限",
         "type": "int",
         "default": 500,
-        "hint": "read_image 工具返回内容的字数上限。"
+        "hint": "read_image 单次返回内容的字数上限，超长自动给出 offset 续读提示；0 表示不限制、返回完整描述。"
       },
       "timeout_sec": {
         "description": "单次识图请求超时秒数",
@@ -296,6 +296,109 @@
         "type": "int",
         "default": 20,
         "hint": "点名通知附带上下文时最多包含的消息条数。"
+      },
+      "attention_window": {
+        "description": "最新消息保留条数",
+        "type": "int",
+        "default": 10,
+        "hint": "后台分段时始终保留最新的这么多条原文不切段；未归档消息达到「分段消息条数 + 本值」才触发概括。"
+      },
+      "msg_max_chars": {
+        "description": "单条消息显示字数",
+        "type": "int",
+        "default": 150,
+        "hint": "read_channel 与点名通知中单条消息纯文本的显示上限，超出部分以省略号代替，图片描述不受影响。0 表示不截断。"
+      }
+    }
+  },
+  "active_options": {
+    "description": "活跃对话跟进",
+    "type": "object",
+    "items": {
+      "window_sec": {
+        "description": "发言后关注秒数",
+        "type": "int",
+        "default": 300,
+        "hint": "机器人在群里发言后的这段时间内，没带 @ 的接话也会交给判定模型决定是否唤醒。0 表示关闭。"
+      },
+      "debounce_sec": {
+        "description": "合并判定秒数",
+        "type": "float",
+        "default": 6.0,
+        "hint": "第一条接话到达后等待该时长，期间的消息合并为一次判定；窗口不因新消息延长。"
+      },
+      "max_consecutive": {
+        "description": "连续跟进上限",
+        "type": "int",
+        "default": 5,
+        "hint": "连续多少轮没有 @ 的跟进唤醒后停止跟进，直到再次被 @ 或命中关键词。"
+      },
+      "threshold": {
+        "description": "唤醒阈值",
+        "type": "float",
+        "default": 0.6,
+        "hint": "唤醒阈值，取值 0~1。专用决策接口比较判定概率，AstrBot 对话模型模式比较三维 0~4 分加权归一化得分。"
+      },
+      "mode": {
+        "description": "判定模式",
+        "type": "string",
+        "default": "decision_api",
+        "options": ["decision_api", "llm"],
+        "labels": ["专用决策接口", "AstrBot 对话模型（三维 0-4 评分）"],
+        "hint": "选择专用决策接口或 AstrBot 已配置的对话模型；必需参数未填全时门卫直接不启用。"
+      },
+      "provider_id": {
+        "description": "判定模型",
+        "type": "string",
+        "default": "",
+        "_special": "select_provider",
+        "condition": {
+          "mode": "llm"
+        },
+        "hint": "必须显式指定 AstrBot 对话模型，留空时不启用门卫（不会回退话题模型或主模型）。"
+      },
+      "protocol": {
+        "description": "接口协议",
+        "type": "string",
+        "default": "gemini_decisions",
+        "options": ["gemini_decisions", "systemone", "openai_decisions"],
+        "labels": [
+          "Gemini Decisions（POST /v1beta/decisions · x-goog-api-key）",
+          "SystemOne（POST /v1/systemone · Bearer）",
+          "OpenAI Decisions（POST /v1/decisions · Bearer）"
+        ],
+        "condition": {
+          "mode": "decision_api"
+        },
+        "hint": "仅决定请求路径、请求体格式与鉴权方式，与模型名解耦；Gemini/OpenAI Decisions 会自动附带留底图。"
+      },
+      "api_base": {
+        "description": "接口地址",
+        "type": "string",
+        "default": "",
+        "condition": {
+          "mode": "decision_api"
+        },
+        "hint": "必填。服务根地址（不含尾部接口路径，支持官方或任意兼容反代）；留空时不启用门卫。"
+      },
+      "api_key": {
+        "description": "接口密钥",
+        "type": "string",
+        "default": "",
+        "secret": true,
+        "condition": {
+          "mode": "decision_api"
+        },
+        "hint": "必填。对应决策接口的 API key（SystemOne 留空时读取环境变量 TYPESAFE_API_KEY）；留空时不启用门卫。"
+      },
+      "model": {
+        "description": "模型名",
+        "type": "string",
+        "default": "",
+        "condition": {
+          "mode": "decision_api"
+        },
+        "hint": "必填。按所用服务填写实际支持的决策模型 ID，不做默认模型名硬编码；留空时不启用门卫。"
       }
     }
   }

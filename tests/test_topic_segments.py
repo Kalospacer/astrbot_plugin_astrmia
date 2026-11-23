@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 
 from irmia.config import load_irmia_config
-from irmia.read_channel_tool import execute_read_channel
+from irmia.read_channel_tool import collect_mention_digest, execute_read_channel
 from irmia.store import IrmiaStore
 from irmia.topic import TopicSummarizer
 
@@ -188,10 +188,13 @@ def test_read_channel_expand_segment(tmp_path: Path) -> None:
 
 
 def test_maybe_summarize_fills_gap(tmp_path: Path) -> None:
-    """积压 120 条时一次最多切 5 段，首尾相接；少于一整窗的尾巴留着下次。"""
+    """积压 120 条时一次只切 4 个整段，不对不足一整段的 20 条尾巴额外调模型。"""
+    calls = 0
 
     class _FakeProvider:
         async def text_chat(self, prompt: str, session_id: str, persist: bool) -> Any:
+            nonlocal calls
+            calls += 1
             return SimpleNamespace(completion_text='{"topic": "在聊抽卡"}')
 
     async def _run() -> None:
@@ -201,7 +204,6 @@ def test_maybe_summarize_fills_gap(tmp_path: Path) -> None:
 
         cfg = load_irmia_config({})
         cfg.topic_cooldown_sec = 0
-        cfg.topic_min_unread = 1
 
         summarizer = TopicSummarizer(store, None, logging.getLogger("test"))
 
@@ -212,6 +214,7 @@ def test_maybe_summarize_fills_gap(tmp_path: Path) -> None:
 
         await summarizer.maybe_summarize(UMO, cfg, force_for_mention=True)
 
+        assert calls == 4
         segs = store.list_topic_segments(UMO, after_id=0, limit=100)
         assert len(segs) == 4
         ordered = sorted(segs, key=lambda s: s["end_msg_id"])
@@ -229,36 +232,82 @@ def test_maybe_summarize_fills_gap(tmp_path: Path) -> None:
     asyncio.run(_run())
 
 
-def test_tail_updates_topic_without_advancing_cursor(tmp_path: Path) -> None:
-    """不足一段的尾巴也更新「在聊」，但总结游标不动，下次还能凑满整段。"""
+@pytest.mark.parametrize("msg_count", [10, 24, 25, 34])
+@pytest.mark.parametrize("force", [False, True])
+def test_below_segment_window_skips_model_call(
+    tmp_path: Path, msg_count: int, force: bool
+) -> None:
+    """不足「一整段 + 尾部保留窗口」（默认 35 条）时直接跳过，不调模型、不写尝试时间戳。"""
+    calls = 0
 
     class _FakeProvider:
         async def text_chat(self, prompt: str, session_id: str, persist: bool) -> Any:
-            return SimpleNamespace(completion_text='{"topic": "在聊抽卡"}')
+            nonlocal calls
+            calls += 1
+            return SimpleNamespace(completion_text='{"topic": "不该被调用"}')
 
     async def _run() -> None:
-        store = IrmiaStore(tmp_path / "tail")
+        store = IrmiaStore(tmp_path / f"below_{msg_count}_{force}")
         await store.open()
-        await _feed(store, 1, 10)
+        try:
+            await _feed(store, 1, msg_count)
+            cfg = load_irmia_config({})
+            cfg.topic_cooldown_sec = 0
 
-        cfg = load_irmia_config({})
-        cfg.topic_cooldown_sec = 0
-        cfg.topic_min_unread = 1
+            summarizer = TopicSummarizer(store, None, logging.getLogger("test"))
 
-        summarizer = TopicSummarizer(store, None, logging.getLogger("test"))
+            async def _fake_resolve(umo: str, provider_id: str) -> Any:
+                return _FakeProvider()
 
-        async def _fake_resolve(umo: str, provider_id: str) -> Any:
-            return _FakeProvider()
+            summarizer.resolve_provider = _fake_resolve  # type: ignore[method-assign]
+            await summarizer.maybe_summarize(UMO, cfg, force_for_mention=force)
 
-        summarizer.resolve_provider = _fake_resolve  # type: ignore[method-assign]
+            assert calls == 0
+            assert store.list_topic_segments(UMO, after_id=0, limit=10) == []
+            st = await store.get_session_state(UMO)
+            assert st["topic"] == ""
+            assert st["topic_to_id"] == 0
+            assert await store.get_kv(f"topic_attempted_at:{UMO}", "") == ""
+        finally:
+            await store.close()
 
-        await summarizer.maybe_summarize(UMO, cfg, force_for_mention=True)
+    asyncio.run(_run())
 
-        assert store.list_topic_segments(UMO, after_id=0, limit=10) == []
-        st = await store.get_session_state(UMO)
-        assert st["topic"] == "在聊抽卡"
-        assert st["topic_to_id"] == 0
-        await store.close()
+
+def test_segment_summarizer_skips_leftover_tail(tmp_path: Path) -> None:
+    """35 条消息只切 1 个 25 条整段，最新 10 条留作保留窗口原文，不再多调一次模型。"""
+    calls = 0
+
+    class _FakeProvider:
+        async def text_chat(self, prompt: str, session_id: str, persist: bool) -> Any:
+            nonlocal calls
+            calls += 1
+            return SimpleNamespace(completion_text='{"topic": "整段话题"}')
+
+    async def _run() -> None:
+        store = IrmiaStore(tmp_path / "one_seg_plus_tail")
+        await store.open()
+        try:
+            await _feed(store, 1, 35)
+            cfg = load_irmia_config({})
+            cfg.topic_cooldown_sec = 0
+
+            summarizer = TopicSummarizer(store, None, logging.getLogger("test"))
+
+            async def _fake_resolve(umo: str, provider_id: str) -> Any:
+                return _FakeProvider()
+
+            summarizer.resolve_provider = _fake_resolve  # type: ignore[method-assign]
+            await summarizer.maybe_summarize(UMO, cfg, force_for_mention=False)
+
+            assert calls == 1
+            segs = store.list_topic_segments(UMO, after_id=0, limit=10)
+            assert len(segs) == 1
+            assert segs[0]["start_msg_id"] == 1 and segs[0]["end_msg_id"] == 25
+            st = await store.get_session_state(UMO)
+            assert st["topic"] == "整段话题" and st["topic_to_id"] == 25
+        finally:
+            await store.close()
 
     asyncio.run(_run())
 
@@ -350,11 +399,14 @@ def test_mention_digest_skips_segment_directory(tmp_path: Path) -> None:
             ts=1700000100.0,
         )
 
-        out = await execute_read_channel(
-            store=store, sid=UMO, digest_only=True, bot_self_ids={"123456"}
+        digest = await collect_mention_digest(
+            store=store, sid=UMO, bot_self_ids={"123456"}
         )
+        out = "\n".join([*digest.trigger_lines, *digest.context_lines])
         assert "[段 " not in out
-        assert "清漪在吗" in out
+        assert "清漪在吗" in "\n".join(digest.trigger_lines)
+        assert "清漪在吗" not in "\n".join(digest.context_lines)
+        assert (await store.get_session_state(UMO))["read_up_to_id"] == 26
         await store.close()
 
     asyncio.run(_run())
@@ -467,6 +519,73 @@ def test_expand_segment_stops_at_end_with_interleaved_ids(
             assert "其他群" not in out
             assert f"段 1，{1 if recalled else 2} 条" in out
             assert (await store.get_session_state(UMO))["read_up_to_id"] == cursor
+        finally:
+            await store.close()
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("fail_on_call", [1, 2])
+def test_maybe_summarize_aborts_tail_when_segment_fails(
+    tmp_path: Path, fail_on_call: int
+) -> None:
+    """某段模型返回空时立刻止损返回，不把整批未消费消息再塞进 tail 重试。"""
+    calls: list[str] = []
+
+    class _FlakyProvider:
+        async def text_chat(self, prompt: str, session_id: str, persist: bool) -> Any:
+            calls.append(prompt)
+            if len(calls) == fail_on_call:
+                return SimpleNamespace(completion_text="")
+            return SimpleNamespace(completion_text='{"topic": "第一段话题"}')
+
+    async def _run() -> None:
+        store = IrmiaStore(tmp_path / f"fail_{fail_on_call}")
+        await store.open()
+        try:
+            await _feed(store, 1, 60)
+            cfg = load_irmia_config({})
+            cfg.topic_cooldown_sec = 0
+
+            summarizer = TopicSummarizer(store, None, logging.getLogger("test"))
+
+            async def _fake_resolve(umo: str, provider_id: str) -> Any:
+                return _FlakyProvider()
+
+            summarizer.resolve_provider = _fake_resolve  # type: ignore[method-assign]
+            await summarizer.maybe_summarize(UMO, cfg, force_for_mention=True)
+
+            assert len(calls) == fail_on_call
+            segs = store.list_topic_segments(UMO, after_id=0, limit=10)
+            assert len(segs) == fail_on_call - 1
+            st = await store.get_session_state(UMO)
+            assert st["topic_to_id"] == (25 if fail_on_call == 2 else 0)
+        finally:
+            await store.close()
+
+    asyncio.run(_run())
+
+
+def test_segment_directory_shows_full_unformed_tail_without_limit(tmp_path: Path) -> None:
+    """不传 limit 时目录后面的 34 条未成段尾巴全部展示，不截断、不给翻页提示。"""
+
+    async def _run() -> None:
+        store = IrmiaStore(tmp_path / "full_tail")
+        await store.open()
+        try:
+            await _feed(store, 1, 25 + 34)
+            await store.append_topic_segment(
+                UMO,
+                start_msg_id=1,
+                end_msg_id=25,
+                start_ts=1700000001,
+                end_ts=1700000025,
+                summary="已经概括的段",
+            )
+            out = await execute_read_channel(store=store, sid=UMO)
+            assert "尚未成段的最近 34 条" in out
+            assert "第 26 条" in out and "第 59 条" in out
+            assert "还有更早的未成段消息" not in out
         finally:
             await store.close()
 

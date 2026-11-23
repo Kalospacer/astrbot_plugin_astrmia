@@ -25,6 +25,7 @@ except Exception:  # pragma: no cover - 沿用旧工具的无 AstrBot 单测基�
 READ_IMAGE_DESCRIPTION = (
     "看聊天记录里某条消息的图。传 sid 和 read_channel 行首的 #编号。"
     "不带 question 就给你详细描述（包括图里的字），带了 question 就只回答这个问题。"
+    "长图描述超出单次上限时会自动分段并给出续读位置，传 offset 继续看后半段（直接读缓存，不重新识图）。"
     "只能看最近 {keep_days} 天的图。硬盘上的图片文件不归这个工具管。"
 )
 
@@ -58,6 +59,11 @@ class ReadImageTool(FunctionTool):
                     "type": "string",
                     "description": "可选。想问图里的什么。不填就给详细描述。",
                 },
+                "offset": {
+                    "type": "integer",
+                    "description": "可选。描述过长被分段时，从第几个字继续往后读，默认 0。",
+                    "default": 0,
+                },
             },
             "required": ["sid", "msg_id"],
         }
@@ -80,6 +86,7 @@ async def execute_read_image(
     msg_id: int,
     index: int = 1,
     question: str = "",
+    offset: int = 0,
     keep_days: int,
 ) -> str:
     """按同一账本来源定位消息，查看指定的留底图或返回可读原因。"""
@@ -100,5 +107,7 @@ async def execute_read_image(
             f"这张图没存下来：只保留最近 {keep_days} 天的图，"
             "插件装上之前的图、或者当时没存成功的图也看不了。"
         )
-    text = await captioner.describe_for_tool(sid, kept, question.strip())
+    text = await captioner.describe_for_tool(
+        sid, kept, question.strip(), offset=max(0, int(offset))
+    )
     return text or "识图的模型都没看成，这张图暂时看不了。"

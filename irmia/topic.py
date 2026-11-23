@@ -112,26 +112,37 @@ class TopicSummarizer:
         *,
         force_for_mention: bool = False,
     ) -> str | None:
-        """从上次断开处往后切段并概括，一次最多补 segment_backfill_max 段。"""
+        """从上次断开处按整段切分并概括，尾部始终留 attention_window 条原文不切。
+
+        攒够「一整段 + 保留窗口」才调模型，一次最多补 segment_backfill_max 段；
+        刚聊完的最新几条留在未成段区，不会被提前压进摘要。
+        """
         if umo in self._running_umos:
             st = await self.store.get_session_state(umo)
             return str(st.get("topic") or "") or None
 
         st = await self.store.get_session_state(umo)
-        read_up_to_id = int(st.get("read_up_to_id", 0) or 0)
         topic_to_id = int(st.get("topic_to_id", 0) or 0)
         topic_updated_at = float(st.get("topic_updated_at", 0.0) or 0.0)
         latest_topic = str(st.get("topic", "") or "") or None
 
         now_ts = time.time()
-        # 非点名强制触发时，先按上次实际尝试时间检查冷却与未读数（失败的尝试同样计入冷却）
+        # 非点名强制触发时，先检查冷却，避免冷却期内每条群消息都拉取上百条完整记录
         if not force_for_mention:
             attempted_raw = await self.store.get_kv(f"topic_attempted_at:{umo}", "")
             attempted_at = float(attempted_raw or topic_updated_at)
             if now_ts - attempted_at < cfg.topic_cooldown_sec:
                 return latest_topic
-            if self.store.count_unread(umo, read_up_to_id) < max(1, cfg.topic_min_unread):
-                return latest_topic
+
+        window = max(1, cfg.segment_msg_count)
+        reserve = max(0, cfg.attention_window)
+        budget = max(1, cfg.segment_backfill_max)
+        batch = self.store.fetch_messages(
+            umo, after_id=topic_to_id, limit=window * budget + reserve, asc=True
+        )
+        if len(batch) < window + reserve:
+            return latest_topic
+        eligible = batch[:-reserve] if reserve > 0 else batch
 
         self._running_umos.add(umo)
         try:
@@ -145,14 +156,8 @@ class TopicSummarizer:
                 return latest_topic
             await self.store.set_kv(f"topic_attempted_at:{umo}", str(now_ts))
 
-            budget = max(1, cfg.segment_backfill_max)
-            window = max(1, cfg.segment_msg_count)
-            batch = self.store.fetch_messages(
-                umo, after_id=topic_to_id, limit=window * budget, asc=True
-            )
-            consumed = 0
             for i in range(budget):
-                rows = batch[i * window : (i + 1) * window]
+                rows = eligible[i * window : (i + 1) * window]
                 if len(rows) < window:
                     break
 
@@ -164,11 +169,9 @@ class TopicSummarizer:
                     await self.store.update_topic(
                         umo, latest_topic or "", rows[-1].id, now_ts
                     )
-                    topic_to_id = rows[-1].id
-                    consumed = (i + 1) * window
                     continue
                 if not summary:
-                    break
+                    return latest_topic
 
                 await self.store.append_topic_segment(
                     umo,
@@ -179,19 +182,8 @@ class TopicSummarizer:
                     summary=summary,
                 )
                 await self.store.update_topic(umo, summary, rows[-1].id, now_ts)
-                topic_to_id = rows[-1].id
-                consumed = (i + 1) * window
                 latest_topic = summary
 
-            # 没攒满一段的尾巴照样更新「在聊」，但不推总结游标，下次还能凑满整段
-            tail = batch[consumed:]
-            if tail:
-                has_text, tail_topic = await self._summarize_rows(
-                    tail, cfg, provider, alias_of
-                )
-                if has_text and tail_topic:
-                    await self.store.update_topic_text(umo, tail_topic, now_ts)
-                    latest_topic = tail_topic
             return latest_topic
         except Exception as exc:
             self.logger.debug(f"[IRMIA] 话题概括跳过 ({umo}): {exc!r}")
@@ -215,8 +207,8 @@ class TopicSummarizer:
         if cfg.read_channel_image_enabled and self.captioner is not None:
             captions = await self.captioner.caption_rows(
                 rows,
-                wait_sec=cfg.vision_timeout_sec,
-                max_new=cfg.read_channel_image_max,
+                wait_sec=0,
+                max_new=0,
             )
 
         lines = []

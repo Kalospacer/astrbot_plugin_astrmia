@@ -7,14 +7,21 @@ import contextvars
 import json
 import re
 import time
-from dataclasses import dataclass
+import weakref
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from astrbot.api.event import MessageChain
-
-from .config import IrmiaConfig, is_in_quiet_window, load_irmia_config
+from .active_gate import ActiveAttentionGate, is_active_gate_configured
+from .config import (
+    DEFAULT_HEARTBEAT_PROMPT,
+    STANDALONE_HEARTBEAT_PROMPT,
+    IrmiaConfig,
+    is_in_quiet_window,
+    load_irmia_config,
+)
+from .cron_bridge import install_cron_patch, is_cron_event, uninstall_cron_patch
 from .heartbeat import HeartbeatEngine, HeartbeatFiring
 from .inbox import GroupBatcher, evaluate_channel_message
 from .mention import build_mention_notice
@@ -39,6 +46,18 @@ from .vision import VisionStore
 from .vision_describe import Captioner
 from .vision_keep import keep_event_images
 from .wake_summary import build_wake_material, summarize_wake
+
+try:
+    from astrbot.api.event import MessageChain
+except Exception:  # pragma: no cover - 单测无 AstrBot 环境时的轻量兜底
+
+    @dataclass
+    class MessageChain:  # type: ignore[no-redef]
+        chain: list[Any] = field(default_factory=list)
+
+        def get_plain_text(self) -> str:
+            return "".join(str(getattr(item, "text", item)) for item in self.chain)
+
 
 try:
     from astrbot.core.agent.message import TextPart
@@ -207,6 +226,24 @@ def extract_event_text_and_at(
     return joined, is_at_bot, self_id
 
 
+class _SendMessagePatchProxy:
+    """挂在 context.send_message 上的轻量代理，弱引用 runtime 避免形成强引用环。"""
+
+    __slots__ = ("_runtime_ref", "_original")
+
+    def __init__(self, runtime: IrmiaRuntime, original: Any) -> None:
+        self._runtime_ref = weakref.ref(runtime)
+        self._original = original
+
+    async def __call__(self, session: Any, message_chain: Any) -> Any:
+        runtime = self._runtime_ref()
+        if runtime is None:
+            return await self._original(session, message_chain)
+        return await runtime._handle_send_message(
+            session, message_chain, self._original
+        )
+
+
 class IrmiaRuntime:
     """协调全局主脑、信箱分流、话题概括、read_channel 工具与呼吸心跳。"""
 
@@ -263,14 +300,18 @@ class IrmiaRuntime:
         self._heartbeat_task: asyncio.Task[None] | None = None
         self._bg_tasks: set[asyncio.Task[Any]] = set()
         self._tools_registered = False
+        self._read_channel_tool: ReadChannelTool | None = None
+        self._read_image_tool: ReadImageTool | None = None
+        self._tool_desc_sig: tuple[bool, int, int] | None = None
         # 夜间静默窗口状态：记住上一拍是否在窗口内，用来在出窗口时把心率计时归零
         self._was_in_quiet = False
         # 留底和描述缓存每小时清理一次，不依赖心跳唤醒开关。
         self._vision_cleanup_at = 0.0
+        self.active_gate = ActiveAttentionGate(logger)
         self._install_send_message_patch()
 
     def cfg(self) -> IrmiaConfig:
-        """动态读取当前最新配置并按需同步心跳参数。"""
+        """动态读取当前最新配置并按需同步心跳参数与工具描述。"""
         c = load_irmia_config(self._raw_config)
         self.heartbeat.reconfigure(
             floor_min=c.heartbeat_floor_min,
@@ -278,6 +319,7 @@ class IrmiaRuntime:
             target_mean_min=c.heartbeat_target_mean_min,
             tick_sec=c.heartbeat_tick_sec,
         )
+        self._sync_tool_descriptions(c)
         return c
 
     def tz_name(self) -> str:
@@ -308,6 +350,7 @@ class IrmiaRuntime:
         await asyncio.to_thread(self.vision_store.open)
         await self._maybe_cleanup_vision(self.cfg())
         self._register_tools()
+        install_cron_patch(self)
         self._start_heartbeat_loop()
         dist = self.heartbeat.distribution()
         self.logger.info(
@@ -318,6 +361,7 @@ class IrmiaRuntime:
     async def terminate(self) -> None:
         """停止心跳循环、等待后台任务收尾并关闭存储。"""
         self._uninstall_send_message_patch()
+        uninstall_cron_patch(self)
         if self._heartbeat_task is not None:
             self._heartbeat_task.cancel()
             try:
@@ -330,6 +374,7 @@ class IrmiaRuntime:
             t.cancel()
         if self._bg_tasks:
             await asyncio.gather(*self._bg_tasks, return_exceptions=True)
+        await self.active_gate.close()
         await asyncio.to_thread(self.vision_store.close)
         await self.store.close()
 
@@ -339,6 +384,24 @@ class IrmiaRuntime:
         task.add_done_callback(self._bg_tasks.discard)
         return task
 
+    def _sync_tool_descriptions(self, cfg: IrmiaConfig) -> None:
+        """按最新配置原地刷新已注册工具的描述文本，相关配置未变时跳过。"""
+        if self._read_channel_tool is None and self._read_image_tool is None:
+            return
+        sig = (cfg.topic_summary_enabled, cfg.segment_msg_count, cfg.image_keep_days)
+        if sig == self._tool_desc_sig:
+            return
+        if self._read_channel_tool is not None:
+            self._read_channel_tool.description = read_channel_description(
+                cfg.topic_summary_enabled,
+                segment_msg_count=cfg.segment_msg_count,
+            )
+        if self._read_image_tool is not None:
+            self._read_image_tool.description = READ_IMAGE_DESCRIPTION.format(
+                keep_days=cfg.image_keep_days
+            )
+        self._tool_desc_sig = sig
+
     def _register_tools(self) -> None:
         if self._tools_registered:
             return
@@ -346,24 +409,22 @@ class IrmiaRuntime:
         if not callable(add_llm_tools):
             return
         try:
-            add_llm_tools(
-                ReadChannelTool(
-                    handler_fn=self._handle_read_channel_tool,
-                    description=read_channel_description(
-                        self.cfg().topic_summary_enabled,
-                        segment_msg_count=self.cfg().segment_msg_count,
-                    ),
-                ),
-                # 群聊消息里的图片用 read_image 看。
-                ReadImageTool(
-                    handler_fn=self._handle_read_image_tool,
-                    description=READ_IMAGE_DESCRIPTION.format(
-                        keep_days=self.cfg().image_keep_days
-                    ),
-                ),
+            cfg = self.cfg()
+            read_channel_tool = ReadChannelTool(
+                handler_fn=self._handle_read_channel_tool,
             )
+            # 群聊消息里的图片用 read_image 看。
+            read_image_tool = ReadImageTool(
+                handler_fn=self._handle_read_image_tool,
+            )
+            self._read_channel_tool = read_channel_tool
+            self._read_image_tool = read_image_tool
+            self._sync_tool_descriptions(cfg)
+            add_llm_tools(read_channel_tool, read_image_tool)
             self._tools_registered = True
         except Exception as exc:
+            self._read_channel_tool = None
+            self._read_image_tool = None
             self.logger.warning(f"[IRMIA] 注册工具失败: {exc}")
 
     async def _handle_read_image_tool(
@@ -379,6 +440,7 @@ class IrmiaRuntime:
             msg_id=int(kwargs["msg_id"]),
             index=int(kwargs.get("index", 1)),
             question=str(kwargs.get("question") or "").strip(),
+            offset=max(0, int(kwargs.get("offset", 0) or 0)),
             keep_days=cfg.image_keep_days,
         )
 
@@ -420,15 +482,27 @@ class IrmiaRuntime:
             caption_wait_sec=cfg.read_channel_image_wait_sec,
             caption_max_new=cfg.read_channel_image_max,
             image_brief_max_chars=cfg.image_brief_max_chars,
+            msg_max_chars=cfg.msg_max_chars,
+            attention_window=cfg.attention_window,
+            segment_msg_count=cfg.segment_msg_count,
         )
 
-    async def _record_bot_speech(self, umo: str, text: str) -> None:
-        """统一记录 Bot 自身发出的消息到兜底账本。"""
+    async def _record_bot_speech(
+        self, umo: str, text: str, cfg: IrmiaConfig | None = None
+    ) -> None:
+        """统一记录 Bot 自身发出的消息到兜底账本，群聊发言同时激活活跃注意力窗口。"""
         if not umo or not text:
             return
         pid, mtype, sid = parse_umo(umo)
         if not pid or not mtype or not sid:
             return
+        now_ts = time.time()
+        if is_group_umo(umo):
+            eff_cfg = cfg if cfg is not None else self.cfg()
+            self.active_gate.mark_bot_spoke(
+                umo, text, now_ts, eff_cfg.active_window_sec
+            )
+
         self_id = next(iter(self._bot_self_ids), "bot")
         await self.store.ensure_message_recorded(
             umo=umo,
@@ -437,17 +511,17 @@ class IrmiaRuntime:
             session_id=sid,
             sender_id=self_id,
             text=text,
-            ts=time.time(),
+            ts=now_ts,
             is_bot=True,
         )
 
     # 主脑会话绑定
 
-    async def resolve_master_umo(self) -> str:
+    async def resolve_master_umo(self, cfg: IrmiaConfig | None = None) -> str:
         """取全局主脑 UMO：先配置，再内存缓存。"""
-        cfg = self.cfg()
-        if cfg.master_umo:
-            return cfg.master_umo
+        eff_cfg = cfg if cfg is not None else self.cfg()
+        if eff_cfg.master_umo:
+            return eff_cfg.master_umo
         if self._auto_master_umo is None:
             self._auto_master_umo = (
                 await self.store.get_kv("auto_master_umo", "")
@@ -571,6 +645,8 @@ class IrmiaRuntime:
             text=raw_str or text,
             mention_keywords=cfg.mention_keywords,
         )
+        if decision.should_wake and not decision.is_private and not is_command:
+            self.active_gate.note_explicit_wake(umo, sender_id, now_ts)
         batch_task: asyncio.Task[bool] | None = None
         if not is_command and decision.should_wake and cfg.group_batch_window_sec > 0:
             item = (
@@ -613,16 +689,36 @@ class IrmiaRuntime:
                 event.set_extra("enable_streaming", False)
             return
 
-        # 群聊未点名 -> 拦截进信箱，不唤醒主脑，按条件后台概括话题
+        # 群聊未点名 -> 先 O(1) 检查活跃窗口再进门卫，未放行则拦截进信箱，按条件后台概括话题
+        followup_pmids: list[str] | None = None
+        caller_name = ""
         if not decision.should_wake:
-            event.stop_event()
-            if cfg.topic_summary_enabled:
-                self._spawn_bg(
-                    self.topic_summarizer.maybe_summarize(
-                        umo, cfg, force_for_mention=False
-                    )
+            if is_active_gate_configured(cfg) and self.active_gate.is_active(
+                umo, now_ts, cfg.active_max_consecutive
+            ):
+                caller_name = self.store.resolve_person_name(
+                    sender_id, sender_name, sender_card, cfg.contacts_map
                 )
-            return
+                followup_pmids = await self._pass_active_gate(
+                    umo,
+                    cfg,
+                    {
+                        "pmid": msg_id,
+                        "sender_id": sender_id,
+                        "sender_name": caller_name,
+                        "text": text or "[非文本消息]",
+                    },
+                    group_name,
+                )
+            if followup_pmids is None:
+                event.stop_event()
+                if cfg.topic_summary_enabled:
+                    self._spawn_bg(
+                        self.topic_summarizer.maybe_summarize(
+                            umo, cfg, force_for_mention=False
+                        )
+                    )
+                return
 
         # 群聊已点名 -> 归零心跳计时，执行防大喘气攒批等待
         self.heartbeat.note_activity()
@@ -654,11 +750,22 @@ class IrmiaRuntime:
             sender_name,
             cfg.contacts_map,
         )
-        caller_name = self.store.resolve_person_name(
-            sender_id, sender_name, sender_card, cfg.contacts_map
-        )
+        if not caller_name:
+            caller_name = self.store.resolve_person_name(
+                sender_id, sender_name, sender_card, cfg.contacts_map
+            )
         at_label = format_short_time(
             now_ts, self.tz_name(), always_hm_only=True
+        )
+        trigger_kind = (
+            "followup"
+            if followup_pmids is not None
+            else ("at" if decision.is_platform_at else "keyword")
+        )
+        trigger_pmids = (
+            followup_pmids
+            if followup_pmids is not None
+            else ([msg_id] if msg_id else [])
         )
 
         event.set_extra(
@@ -666,14 +773,59 @@ class IrmiaRuntime:
             {
                 "where_name": where_name,
                 "caller_name": caller_name,
-                "is_at": decision.is_platform_at,
+                "trigger_kind": trigger_kind,
                 "at_label": at_label,
                 "topic": cached_topic,
+                "trigger_pmids": trigger_pmids,
             },
         )
         # 内嵌通知会替她读过这个群；只有不内嵌时，工具才需要按「本轮叫醒群」兜底展示最近消息
         if not cfg.mention_inline_enabled:
             event.set_extra("irmia_called_sid", umo)
+
+    async def _pass_active_gate(
+        self, umo: str, cfg: IrmiaConfig, item: dict[str, Any], group_name: str
+    ) -> list[str] | None:
+        """活跃期内未点名的群消息：防抖攒批后交给判定协议。
+
+        Returns:
+            放行时返回本批平台消息编号（可能为空列表），不放行或不是领头者返回 None。
+        """
+        gate = self.active_gate
+        collected = await gate.collect_batch(umo, item, cfg.active_debounce_sec)
+        if collected is None:
+            return None
+        batch, opened_at = collected
+        if not gate.may_auto_wake(umo, opened_at, time.time(), cfg.active_max_consecutive):
+            return None
+
+        evidence = await gate.build_evidence(
+            umo=umo,
+            batch=batch,
+            store=self.store,
+            vision_store=self.vision_store,
+            captioner=self.captioner,
+            cfg=cfg,
+            group_name=group_name,
+        )
+        result = await gate.decide(
+            evidence,
+            cfg,
+            provider_resolver=lambda: self._resolve_active_provider(cfg.active_provider_id),
+        )
+        if not result.triggered or not gate.commit_auto_wake(
+            umo, opened_at, time.time(), cfg.active_max_consecutive
+        ):
+            return None
+        return [str(it["pmid"]) for it in batch if it.get("pmid")]
+
+    async def _resolve_active_provider(self, provider_id: str) -> Any:
+        """仅按显式配置的 active_options.provider_id 取判定模型，不回退话题模型或主模型。"""
+        pid = (provider_id or "").strip()
+        if not pid:
+            return None
+        getter = getattr(self.context, "get_provider_by_id", None)
+        return getter(pid) if callable(getter) else None
 
     # 钩子 2：等待 LLM 请求
 
@@ -712,16 +864,18 @@ class IrmiaRuntime:
             event.set_extra("irmia_final_llm_resp", False)
             event.set_extra("irmia_in_decorating", False)
         is_wake = bool(event.get_extra("irmia_wake")) if hasattr(event, "get_extra") else False
-        if not is_wake:
+        is_cron = is_cron_event(event)
+        is_autonomous = is_wake or is_cron
+        if not is_autonomous:
             self._last_active_event = event
         self._current_chat_event.set(event)
 
-        # 1. 全局唯一主脑历史绑定（聊天排队后重读最新存储；内部唤醒自行绑定旧历史供思考，不在此覆盖）
-        master_umo = await self.resolve_master_umo()
-        if master_umo and not is_wake:
+        # 1. 全局唯一主脑历史绑定（聊天排队后重读最新存储；内部唤醒与定时任务自行绑定，不在此覆盖）
+        master_umo = await self.resolve_master_umo(cfg)
+        if master_umo and not is_autonomous:
             await self._bind_master_conversation(master_umo, req)
 
-        # 2. 持聊天回合的主脑锁后生成点名卡片，同时清理原消息的引用/图片/音频块
+        # 2. 持聊天回合的主脑锁后生成点名卡片：触发事实写 prompt 落盘，前情作临时块本轮可见
         mention_meta = (
             event.get_extra("irmia_mention_meta")
             if hasattr(event, "get_extra")
@@ -738,7 +892,7 @@ class IrmiaRuntime:
                 captioner=self.captioner,
             )
             event.set_extra("irmia_mention_notice", mention_notice)
-            req.prompt = mention_notice
+            req.prompt = mention_notice.permanent_prompt
             if isinstance(getattr(req, "image_urls", None), list):
                 req.image_urls.clear()
             if isinstance(getattr(req, "audio_urls", None), list):
@@ -751,7 +905,11 @@ class IrmiaRuntime:
                         ("<Quoted Message>", "<image_caption>", "[Audio Attachment]", "[File Attachment]", "[Video Attachment]")
                     )
                 ]
-        elif umo and not is_wake and not umo.startswith(("irmia:", "cron:")):
+                if mention_notice.temp_context:
+                    temp_part = TextPart(text=mention_notice.temp_context)
+                    temp_part.mark_as_temp()
+                    req.extra_user_content_parts.append(temp_part)
+        elif umo and not is_autonomous and not umo.startswith(("irmia:", "cron:")):
             _, mtype, _ = parse_umo(umo)
             if "group" not in mtype.lower():
                 sender_id = str(getattr(event, "get_sender_id", lambda: "")() or "")
@@ -791,6 +949,7 @@ class IrmiaRuntime:
             mention_inline=cfg.mention_inline_enabled,
             segment_msg_count=cfg.segment_msg_count,
             topic_summary_enabled=cfg.topic_summary_enabled,
+            active_followup=cfg.active_window_sec > 0,
         )
         workspace_note = ""
         if hasattr(req, "system_prompt"):
@@ -807,18 +966,24 @@ class IrmiaRuntime:
             include_brief_in_extra = True
 
         if hasattr(req, "extra_user_content_parts"):
-            sessions = await self.store.list_sessions(self.day_start_ts(cfg))
+            sessions = await self.store.list_sessions(
+                self.day_start_ts(cfg), include_unread=True
+            )
             tz = self.tz_name()
             parts = []
             if include_brief_in_extra:
                 parts.append(self_brief)
+            if is_wake:
+                wake_line = "这次是你自己醒来的，没有人在等你回话。"
+            elif is_cron:
+                wake_line = f"这次是定时任务唤醒（目标会话：{umo}）。"
+            else:
+                wake_line = f"这次叫醒你的会话：{umo}"
             parts.extend(
                 [
                     "=== [IRMIA] 当前状态 ===",
                     format_clock_line(time.time(), tz),
-                    "这次是你自己醒来的，没有人在等你回话。"
-                    if is_wake
-                    else f"这次叫醒你的会话：{umo}",
+                    wake_line,
                     render_session_list(
                         sessions,
                         lambda s: self.store.resolve_session_name(
@@ -869,7 +1034,10 @@ class IrmiaRuntime:
         self, event: Any, tool: Any, tool_args: Any, tool_result: Any
     ) -> None:
         """记录 send_message_to_user 成功回执：标记已发当前窗口并记账。"""
-        if is_internal_silent_event(event) or not self.cfg().enabled:
+        if is_internal_silent_event(event):
+            return
+        cfg = self.cfg()
+        if not cfg.enabled:
             return
         if getattr(tool, "name", "") != "send_message_to_user":
             return
@@ -907,7 +1075,7 @@ class IrmiaRuntime:
                         text_parts.append(f"[{k}]")
             spoken_text = "".join(text_parts).strip()
             if spoken_text:
-                await self._record_bot_speech(target_umo, spoken_text)
+                await self._record_bot_speech(target_umo, spoken_text, cfg=cfg)
         except Exception as exc:
             self.logger.debug(f"[IRMIA] 处理 send_message_to_user 回执异常: {exc}")
 
@@ -921,49 +1089,53 @@ class IrmiaRuntime:
         original = self.context.send_message
         self._original_send_message = original
         setattr(self.context, "_irmia_send_patched", True)
+        self.context.send_message = _SendMessagePatchProxy(self, original)
 
-        async def patched_send_message(session, message_chain):
-            ev = self._current_chat_event.get()
-            if message_chain is not None and ev is not None and not is_internal_silent_event(ev):
-                blocked = self._blocked_internal_log(ev, message_chain)
-                if blocked:
-                    # 抛错而不是假装成功：假装成功会让上游把这段日志记成"已发送"，
-                    # 留下一份假的送达记录；抛错能如实告诉模型这条路走不通。
-                    self.logger.warning(
-                        f"[IRMIA 拦截内部日志外发] target={session} 文本={blocked[:80]}"
-                    )
-                    raise RuntimeError(
-                        "internal-log blocked: 以 [IRMIA Wake]/[管家任务通知]/"
-                        "[CronJob]/[BackgroundTask] 开头的工作小结不允许外发，"
-                        "它只属于对话历史与日志。若确实要和人说话，请换成正常的聊天内容；"
-                        "没事就输出 [SILENT] 结束本轮。"
-                    )
-            if self.cfg().enabled and self.cfg().intercept_direct_reply:
+    async def _handle_send_message(
+        self, session: Any, message_chain: Any, original: Any
+    ) -> Any:
+        cfg = self.cfg()
+        ev = self._current_chat_event.get()
+        if message_chain is not None and ev is not None and not is_internal_silent_event(ev):
+            blocked = self._blocked_internal_log(ev, message_chain, cfg=cfg)
+            if blocked:
+                # 抛错而不是假装成功：假装成功会让上游把这段日志记成"已发送"，
+                # 留下一份假的送达记录；抛错能如实告诉模型这条路走不通。
+                self.logger.warning(
+                    f"[IRMIA 拦截内部日志外发] target={session} 文本={blocked[:80]}"
+                )
+                raise RuntimeError(
+                    "internal-log blocked: 以 [IRMIA Wake]/[管家任务通知]/"
+                    "[CronJob]/[BackgroundTask] 开头的工作小结不允许外发，"
+                    "它只属于对话历史与日志。若确实要和人说话，请换成正常的聊天内容；"
+                    "没事就输出 [SILENT] 结束本轮。"
+                )
+        if cfg.enabled and cfg.intercept_direct_reply:
+            if (
+                ev is not None
+                and not is_internal_silent_event(ev)
+                and not self._is_autonomous_event(ev)
+            ):
+                ev_umo = str(getattr(ev, "unified_msg_origin", "") or "").strip()
                 if (
-                    ev is not None
-                    and not is_internal_silent_event(ev)
-                    and not ev.get_extra("irmia_wake")
+                    ev_umo
+                    and str(session) == ev_umo
+                    and not ev.get_extra("irmia_in_decorating")
                 ):
-                    ev_umo = str(getattr(ev, "unified_msg_origin", "") or "").strip()
-                    if (
-                        ev_umo
-                        and str(session) == ev_umo
-                        and not ev.get_extra("irmia_in_decorating")
-                    ):
-                        chain = getattr(message_chain, "chain", None)
-                        if chain:
-                            buffered = ev.get_extra("irmia_buffered_tool_chain", [])
-                            if not isinstance(buffered, list):
-                                buffered = []
-                            buffered.extend(chain)
-                            ev.set_extra("irmia_buffered_tool_chain", buffered)
-                            ev.set_extra("irmia_sent_current_session", True)
-                            return True
-            return await original(session, message_chain)
+                    chain = getattr(message_chain, "chain", None)
+                    if chain:
+                        buffered = ev.get_extra("irmia_buffered_tool_chain", [])
+                        if not isinstance(buffered, list):
+                            buffered = []
+                        buffered.extend(chain)
+                        ev.set_extra("irmia_buffered_tool_chain", buffered)
+                        ev.set_extra("irmia_sent_current_session", True)
+                        return True
+        return await original(session, message_chain)
 
-        self.context.send_message = patched_send_message
-
-    def _blocked_internal_log(self, event: Any, message_chain: Any) -> str:
+    def _blocked_internal_log(
+        self, event: Any, message_chain: Any, cfg: IrmiaConfig | None = None
+    ) -> str:
         """自主唤醒 / 定时任务轮里命中内部日志前缀时，返回被拦文本，否则空串。
 
         心跳小结（`[IRMIA Wake]`）、女仆通知（`[管家任务通知]`）、定时任务
@@ -972,7 +1144,8 @@ class IrmiaRuntime:
         等于把自己的工作日志当聊天消息推给用户。这类文本只该留在历史与日志里。
         """
         try:
-            if not self.cfg().enabled:
+            eff_cfg = cfg if cfg is not None else self.cfg()
+            if not eff_cfg.enabled:
                 return ""
             try:
                 text = str(message_chain.get_plain_text() or "").strip()
@@ -992,7 +1165,7 @@ class IrmiaRuntime:
         """判断是否是自主唤醒 / 定时任务这类非用户触发的轮次。"""
         if event is None:
             return False
-        if event.__class__.__name__ in {"HeartbeatWakeEvent", "CronMessageEvent"}:
+        if is_cron_event(event) or event.__class__.__name__ == "HeartbeatWakeEvent":
             return True
         try:
             return bool(event.get_extra("irmia_wake"))
@@ -1001,8 +1174,16 @@ class IrmiaRuntime:
 
     def _uninstall_send_message_patch(self) -> None:
         if self.context is not None and getattr(self.context, "_irmia_send_patched", False):
-            if hasattr(self, "_original_send_message"):
-                self.context.send_message = self._original_send_message
+            original = getattr(self, "_original_send_message", None)
+            if (
+                getattr(original, "__self__", None) is self.context
+                and hasattr(type(self.context), "send_message")
+            ):
+                if "send_message" in getattr(self.context, "__dict__", {}):
+                    delattr(self.context, "send_message")
+            elif original is not None:
+                self.context.send_message = original
+            self._original_send_message = None
             setattr(self.context, "_irmia_send_patched", False)
 
     async def _flush_unconsumed_buffered_chain(self, event: Any) -> None:
@@ -1037,10 +1218,10 @@ class IrmiaRuntime:
             event.set_extra("irmia_final_llm_resp", True)
 
     async def on_decorating_result(self, event: Any) -> None:
-        """拦截过渡文字、[SILENT] 与工具回流。
+        """处理最终回复步的 [SILENT] 整链丢弃与工具回复回流。
 
-        1. 在 OnLLMResponseEvent 触发前（即模型仍在调用 read_channel / send_message_to_user 的中间步骤），
-           模型顺嘴输出的过渡文字（preamble）在此直接收起，不发往聊天窗口，也不开启 irmia_in_decorating。
+        1. 在 OnLLMResponseEvent 触发前（即模型仍在调用工具的中间步骤），正文照常放行，
+           但延后置位 irmia_in_decorating，避免 intercept_direct_reply 的暂存回流提前失效。
         2. 最终步若模型曾通过 send_message_to_user 发往当前唤醒窗口，暂存的真实回复链在此处替换掉
            模型末尾的自言自语总结，继续交给后续装饰钩子（表情包替换、分段发送）。
         """
@@ -1117,7 +1298,7 @@ class IrmiaRuntime:
             if not plain_text:
                 return
             umo = str(getattr(event, "unified_msg_origin", "") or "").strip()
-            await self._record_bot_speech(umo, plain_text)
+            await self._record_bot_speech(umo, plain_text, cfg=cfg)
         except Exception:
             pass
 
@@ -1249,78 +1430,73 @@ class IrmiaRuntime:
         finally:
             self._wake_running = False
 
-    async def _run_wake_turn(
+    def _has_astrhe(self) -> bool:
+        """检测环境是否已加载 AstrHe 工具或账本。"""
+        try:
+            tm = self.context.get_llm_tool_manager()
+            get_func = getattr(tm, "get_func", None)
+            if callable(get_func):
+                return get_func("astrhe_read_todos") is not None
+        except Exception:
+            pass
+        return bool(self.store.astrhe_db_path and self.store.astrhe_db_path.is_file())
+
+    async def run_master_agent_turn(
         self,
-        master_umo: str,
-        firing: HeartbeatFiring,
-    ) -> str:
-        """不持主脑锁跑原生 Agent 唤醒，做过事则在末尾排队写入轻量小结。"""
+        event: Any,
+        *,
+        req: Any,
+        max_steps: int,
+        cfg: IrmiaConfig,
+        scene: str,
+        attach_send_tool: bool = True,
+        core_cfg: dict[str, Any] | None = None,
+    ) -> Any:
+        """在主脑历史上运行自主轮次（心跳唤醒与定时任务共用）。
+
+        统一处理心跳模型覆写、压缩配置装配、SendMessageToUserTool 挂载、
+        _current_chat_event 作用域、build_main_agent(apply_reset=False)、
+        OnLLMRequestEvent 补发、reset_coro 与 step_until_done。
+        """
         from astrbot.core.agent.tool import ToolSet
-        from astrbot.core.astr_main_agent import (
-            MainAgentBuildConfig,
-            build_main_agent,
-        )
+        from astrbot.core.astr_main_agent import MainAgentBuildConfig, build_main_agent
+        from astrbot.core.config.agent_runner import resolve_context_compression_config
         from astrbot.core.pipeline.context import call_event_hook
-        from astrbot.core.provider.entities import ProviderRequest
         from astrbot.core.star.star_handler import EventType
         from astrbot.core.tools.message_tools import SendMessageToUserTool
 
-        cfg = self.cfg()
-        session = MessageSession.from_str(master_umo)
-
-        prompt_text = render_heartbeat_prompt(
-            cfg.heartbeat_prompt, firing.quiet_seconds, firing.idle_ticks
-        )
-
-        wake_event = HeartbeatWakeEvent(
-            context=self.context,
-            session=session,
-            message=prompt_text,
-            extras={"irmia_wake": True},
-            message_type=session.message_type,
-        )
         if cfg.heartbeat_provider_id:
             if self.context.get_provider_by_id(cfg.heartbeat_provider_id) is not None:
-                wake_event.set_extra("selected_provider", cfg.heartbeat_provider_id)
+                event.set_extra("selected_provider", cfg.heartbeat_provider_id)
             else:
                 self.logger.warning(
-                    f"[IRMIA] 配置的心跳模型 {cfg.heartbeat_provider_id} 不存在，本次唤醒回退主脑默认模型"
+                    f"[IRMIA] 配置的心跳模型 {cfg.heartbeat_provider_id} 不存在，本次{scene}回退主脑默认模型"
                 )
 
-        cfg_dict = self.context.get_config(umo=wake_event.unified_msg_origin)
-        provider_settings = cfg_dict.get("provider_settings", {}) or {}
-        runner_cfg = (
-            cfg_dict.get("agent_runner", {}).get("config", {}) or {}
+        if attach_send_tool:
+            if not getattr(req, "func_tool", None):
+                req.func_tool = ToolSet()
+            req.func_tool.add_tool(
+                self.context.get_llm_tool_manager().get_builtin_tool(
+                    SendMessageToUserTool
+                )
+            )
+
+        cfg_dict = (
+            core_cfg
+            if core_cfg is not None
+            else self.context.get_config(umo=event.unified_msg_origin)
         )
+        provider_settings = cfg_dict.get("provider_settings", {}) or {}
+        runner_cfg = cfg_dict.get("agent_runner", {}).get("config", {}) or {}
         persona_cfg = runner_cfg.get("persona", {}) or {}
         misc_cfg = runner_cfg.get("misc", {}) or {}
-        compression_cfg = runner_cfg.get("compression", {}) or {}
-
-        # 与核心 InternalAgentSubStage 相同的上下文压缩/裁剪参数映射
-        max_turns = compression_cfg.get("max_turns", -1)
-        trim_turns = compression_cfg.get("trim_turns", 1)
-        dequeue_turns = min(
-            max(1, trim_turns), max_turns - 1 if max_turns > 0 else trim_turns
-        )
-
         build_cfg = MainAgentBuildConfig(
             tool_call_timeout=int(misc_cfg.get("tool_call_timeout", 120) or 120),
             fallback_provider_ids=runner_cfg.get("model", {}).get(
                 "fallback_provider_ids", []
             ),
-            context_limit_reached_strategy=compression_cfg.get(
-                "overflow_strategy", "truncate_by_turns"
-            ),
-            llm_compress_instruction=compression_cfg.get("instruction", ""),
-            llm_compress_keep_recent_ratio=compression_cfg.get(
-                "keep_recent_ratio", 0.15
-            ),
-            llm_compress_provider_id=compression_cfg.get("provider_id", ""),
-            max_context_length=max_turns,
-            dequeue_context_length=dequeue_turns if dequeue_turns > 0 else 1,
-            fallback_max_context_tokens=compression_cfg.get(
-                "fallback_max_tokens", 128000
-            ),
+            **resolve_context_compression_config(runner_cfg.get("compression", {})),
             llm_safety_mode=bool(persona_cfg.get("safety_mode", True)),
             safety_mode_strategy=str(
                 persona_cfg.get("safety_mode_strategy", "system_prompt")
@@ -1333,32 +1509,103 @@ class IrmiaRuntime:
             provider_settings=provider_settings,
         )
 
+        event_token = self._current_chat_event.set(event)
+        try:
+            build_res = await build_main_agent(
+                event=event,
+                plugin_context=self.context,
+                config=build_cfg,
+                req=req,
+                apply_reset=False,
+            )
+            if not build_res:
+                return None
+
+            # 触发全局 OnLLMRequestEvent 钩子（使本插件及 AstrHe / LivingMemory 的注入全部生效）
+            await call_event_hook(event, EventType.OnLLMRequestEvent, req)
+            if build_res.reset_coro is not None:
+                await build_res.reset_coro
+
+            runner = build_res.agent_runner
+            async for _ in runner.step_until_done(max_steps):
+                pass
+            return runner
+        finally:
+            self._current_chat_event.reset(event_token)
+
+    async def persist_master_summary(
+        self,
+        master_umo: str,
+        event: Any,
+        req: Any,
+        summary_note: str,
+        *,
+        scene: str,
+    ) -> bool:
+        """持主脑锁重读最新主脑历史并安全追加自主轮次小结。"""
+        from astrbot.core.utils.history_saver import persist_agent_history
+
+        if req.conversation is None:
+            return False
+        conv_mgr = self.context.conversation_manager
+        async with self._brain_lock:
+            fresh_conv = await conv_mgr.get_conversation(
+                master_umo, req.conversation.cid
+            )
+            if fresh_conv is None:
+                self.logger.warning(f"[IRMIA] {scene}小结跳过：主脑对话已不存在")
+                return False
+            req.conversation = fresh_conv
+            await persist_agent_history(
+                conv_mgr,
+                event=event,
+                req=req,
+                summary_note=summary_note,
+            )
+        return True
+
+    async def _run_wake_turn(
+        self,
+        master_umo: str,
+        firing: HeartbeatFiring,
+    ) -> str:
+        """不持主脑锁跑原生 Agent 唤醒，做过事则在末尾排队写入轻量小结。"""
+        from astrbot.core.provider.entities import ProviderRequest
+
+        cfg = self.cfg()
+        session = MessageSession.from_str(master_umo)
+        prompt_template = (
+            STANDALONE_HEARTBEAT_PROMPT
+            if cfg.heartbeat_prompt == DEFAULT_HEARTBEAT_PROMPT
+            and not self._has_astrhe()
+            else cfg.heartbeat_prompt
+        )
+        prompt_text = render_heartbeat_prompt(
+            prompt_template, firing.quiet_seconds, firing.idle_ticks
+        )
+
+        wake_event = HeartbeatWakeEvent(
+            context=self.context,
+            session=session,
+            message=prompt_text,
+            extras={"irmia_wake": True},
+            message_type=session.message_type,
+        )
         req = ProviderRequest()
         await self._bind_master_conversation(master_umo, req)
         req.prompt = prompt_text
 
-        tool_mgr = self.context.get_llm_tool_manager()
-        req.func_tool = ToolSet()
-        req.func_tool.add_tool(tool_mgr.get_builtin_tool(SendMessageToUserTool))
-
-        build_res = await build_main_agent(
-            event=wake_event,
-            plugin_context=self.context,
-            config=build_cfg,
+        runner = await self.run_master_agent_turn(
+            wake_event,
             req=req,
-            apply_reset=False,
+            max_steps=cfg.wake_max_steps,
+            cfg=cfg,
+            scene="唤醒",
+            attach_send_tool=True,
         )
-        if not build_res:
+        if runner is None:
             return "构建主 Agent 失败（可能未配置可用模型提供商）。"
 
-        # 触发全局 OnLLMRequestEvent 钩子（使本插件及 AstrHe / LivingMemory 的注入全部生效）
-        await call_event_hook(wake_event, EventType.OnLLMRequestEvent, req)
-        if build_res.reset_coro is not None:
-            await build_res.reset_coro
-
-        runner = build_res.agent_runner
-        async for _ in runner.step_until_done(cfg.wake_max_steps):
-            pass
         llm_resp = runner.get_final_llm_resp()
         reply_text = (
             llm_resp.completion_text.strip()
@@ -1385,8 +1632,6 @@ class IrmiaRuntime:
         cfg: IrmiaConfig,
     ) -> None:
         """锁外生成轻量小结，锁内重读最新主脑历史并追加；生成失败只记日志。"""
-        from astrbot.core.utils.history_saver import persist_agent_history
-
         if req.conversation is None:
             return
         provider = await self.topic_summarizer.resolve_provider(
@@ -1408,18 +1653,15 @@ class IrmiaRuntime:
             return
         if not summary:
             return
-        conv_mgr = self.context.conversation_manager
-        async with self._brain_lock:
-            req.conversation = await conv_mgr.get_conversation(
-                master_umo, req.conversation.cid
-            )
-            await persist_agent_history(
-                conv_mgr,
-                event=wake_event,
-                req=req,
-                summary_note=f"[IRMIA Wake] {summary}",
-            )
-        self.logger.info(f"[IRMIA 唤醒小结] {summary}")
+        wrote = await self.persist_master_summary(
+            master_umo,
+            wake_event,
+            req,
+            f"[IRMIA Wake] {summary}",
+            scene="唤醒",
+        )
+        if wrote:
+            self.logger.info(f"[IRMIA 唤醒小结] {summary}")
 
     # 状态诊断
 
@@ -1430,7 +1672,9 @@ class IrmiaRuntime:
         dist = self.heartbeat.distribution()
         quiet_min = self.heartbeat.quiet_ms() / 60_000.0
         cur_p = self.heartbeat.current_probability()
-        sessions = await self.store.list_sessions(include_unread=True)
+        sessions = await self.store.list_sessions(
+            self.day_start_ts(cfg), include_unread=True
+        )
         astrhe_linked = (
             "已连接"
             if self.store.astrhe_db_path and self.store.astrhe_db_path.is_file()

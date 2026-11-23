@@ -95,6 +95,7 @@ def build_self_brief(
     mention_inline: bool = True,
     segment_msg_count: int = 25,
     topic_summary_enabled: bool = True,
+    active_followup: bool = False,
 ) -> str:
     """拼接注入主脑的静态装置自述，放在 system_prompt 稳定前缀里。
 
@@ -104,6 +105,7 @@ def build_self_brief(
         mention_inline: 点名通知是否已内嵌消息与前后文。
         segment_msg_count: 群消息切成一段需要多少条。
         topic_summary_enabled: 是否展示话题概括与段目录说明。
+        active_followup: 是否开启发言后的活跃对话跟进。
 
     Returns:
         装置自述文本。
@@ -121,12 +123,14 @@ def build_self_brief(
 
     group_rules = (
         [
-            f"- 会话清单显示分段数量，点名通知显示未读条数。每 {segment_msg_count} 条消息为一段，附一句摘要。",
+            "- 会话清单每行标有「未读 N 条」或「无新消息」；标「无新消息」的会话无需调用 read_channel 重复检查。",
+            f"- 会话清单同时显示分段数量，每 {segment_msg_count} 条消息为一段，附一句摘要。",
             f"- 未唤醒你的群消息仅记为未读，不触发唤醒。清单中显示分段数与 {topic_max_chars} 字以内的话题摘要。",
             "- 使用 read_channel(sid=...) 查看。",
         ]
         if topic_summary_enabled
         else [
+            "- 会话清单每行标有「未读 N 条」或「无新消息」；标「无新消息」的会话无需调用 read_channel 重复检查。",
             "- 未唤醒你的群消息仅记为未读，不触发唤醒。",
             "- 使用 read_channel(sid=...) 查看最近原文，传 before=<消息编号> 向前翻页。",
         ]
@@ -146,6 +150,13 @@ def build_self_brief(
             "- 群聊被 @ 或命中关键词时，通知内已附带相关消息及前后文，据此判断是否回应；信息不足时用 read_channel 查看更多。"
             if mention_inline
             else "- 群聊被 @ 或命中关键词时，通知仅提示有人唤醒，先用 read_channel 查看上下文再决定是否回应。",
+            *(
+                [
+                    "- 你在某个群发言后的几分钟内，有人没带 @ 顺着你的话接茬也会唤醒你，通知标为「活跃对话跟进」；不必接话时输出 [SILENT]。"
+                ]
+                if active_followup
+                else []
+            ),
             "",
             "群消息：",
             *group_rules,
@@ -172,6 +183,7 @@ def render_session_list(
         kind_label = CHAT_TYPE_LABELS.get(mtype, mtype or "会话")
         where = resolve_where_fn(s)
         when = format_local_stamp(s.last_ts, tz_name)
+        unread_part = f"｜未读 {s.unread} 条" if s.unread > 0 else "｜无新消息"
         segment_part = (
             f"｜今天 {s.today_segments} 段 / 历史 {s.history_segments} 段"
             if show_topic and is_group_umo(s.umo)
@@ -184,7 +196,7 @@ def render_session_list(
             else "｜我还没在这说过话"
         )
         lines.append(
-            f"- {kind_label} · {where}｜sid {s.umo}｜最后 {when}{segment_part}{topic_part}{my_last_part}"
+            f"- {kind_label} · {where}｜sid {s.umo}｜最后 {when}{unread_part}{segment_part}{topic_part}{my_last_part}"
         )
     rest = (
         f"\n（还有 {len(sessions) - max_items} 个更早的会话没列出来。）"
@@ -198,14 +210,14 @@ def render_session_list(
     )
 
 
-def _mention_head(
-    where_name: str, caller_name: str, is_at: bool, at_label: str
-) -> str:
-    """点名通知的开头：几点、在哪、谁叫了你。"""
-    called = "@了你" if is_at else "提到了你"
-    who = f"（是 {caller_name}）" if caller_name and caller_name != where_name else ""
-    stamp = f"{at_label}，" if at_label else ""
-    return f"{stamp}{where_name} 里有人{called}{who}"
+TRIGGER_AT = "@了你"
+TRIGGER_KEYWORD = "提到了你"
+TRIGGER_FOLLOWUP = "活跃对话跟进"
+TRIGGER_LABELS = {
+    "at": TRIGGER_AT,
+    "keyword": TRIGGER_KEYWORD,
+    "followup": TRIGGER_FOLLOWUP,
+}
 
 
 def _talking(topic: str) -> str:
@@ -221,9 +233,17 @@ def render_mention_notice(
     at_label: str,
     unread: int,
     topic: str,
+    is_active_followup: bool = False,
 ) -> str:
     """生成群点名的半遮面通知。"""
-    head = _mention_head(where_name, caller_name, is_at, at_label)
+    called = (
+        "接着你的话在聊"
+        if is_active_followup
+        else (TRIGGER_AT if is_at else TRIGGER_KEYWORD)
+    )
+    who = f"（是 {caller_name}）" if caller_name and caller_name != where_name else ""
+    stamp = f"{at_label}，" if at_label else ""
+    head = f"{stamp}{where_name} 里有人{called}{who}"
     talking = _talking(topic)
 
     if unread <= 0:
@@ -237,25 +257,45 @@ def render_mention_notice(
     )
 
 
-def render_mention_notice_with_digest(
+def render_mention_permanent_prompt(
     *,
     umo: str,
     where_name: str,
     caller_name: str,
-    is_at: bool,
+    trigger_label: str,
     at_label: str,
+    trigger_lines: Sequence[str],
+) -> str:
+    """生成写入历史的触发事实：群名、sid、时刻与真正触发唤醒的那几条原话。"""
+    who = f"（{caller_name}）" if caller_name else ""
+    head = f"[群聊 · {where_name} · sid {umo} · {at_label} · {trigger_label}{who}]"
+    return "\n".join([head, *trigger_lines])
+
+
+def render_mention_temp_context(
+    *,
+    umo: str,
     unread: int,
     topic: str,
-    digest: str,
+    context_lines: Sequence[str],
+    oldest_shown_id: int,
+    leftover: int,
+    has_more: bool = False,
 ) -> str:
-    """生成已附读群结果的点名通知，保留消息编号与翻页指路。"""
-    head = _mention_head(where_name, caller_name, is_at, at_label)
-    return (
-        f"{head}，该会话共 {unread} 条未读。{_talking(topic)}\n"
-        f"以下为命中的消息及前后文，已读并更新水位，无需再次 read_channel 该会话（sid={umo}）：\n"
-        f"{digest}\n"
-        "需要更早的记录时按上方提示传 before 参数。是否回复由你决定。"
-    )
+    """生成只在本轮可见的前情：铺垫消息、话题、免重读与翻页指引。"""
+    lines = [
+        f"该会话共 {unread} 条未读。{_talking(topic)}".rstrip(),
+        f"以下为触发消息的前情，已读并更新水位，无需再次 read_channel 该会话（sid={umo}）：",
+        *(context_lines or ["（没有更早的前情）"]),
+    ]
+    if leftover > 0:
+        lines.append(f"更早还有 {leftover} 条未读没有列出。")
+    if has_more and oldest_shown_id > 0:
+        lines.append(
+            f"需要更早的记录时传 before={oldest_shown_id} 往前翻（翻页不改已读）。"
+        )
+    lines.append("是否回复由你决定。")
+    return "\n".join(lines)
 
 
 def render_heartbeat_prompt(template: str, quiet_seconds: float, idle_ticks: int) -> str:

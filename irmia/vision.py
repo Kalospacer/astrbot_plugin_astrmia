@@ -19,8 +19,6 @@ from typing import Sequence
 
 from PIL import Image
 
-DHASH_THRESHOLD = 4
-DHASH_SCAN_LIMIT = 500
 KEEP_LONG_SIDE = 1024
 KEEP_JPEG_QUALITY = 85
 #: 孤儿文件至少存在这么久才清理，避开「已写盘、尚未登记」的瞬间
@@ -65,23 +63,6 @@ class KeptImage:
     path: str
 
 
-def compute_dhash(image: Image.Image) -> str:
-    """计算 9×8 灰度相邻比较的 64 位 dHash。"""
-    with image.convert("L").resize((9, 8), Image.Resampling.LANCZOS) as small:
-        pixels = list(small.getdata())
-    value = 0
-    for row in range(8):
-        for col in range(8):
-            if pixels[row * 9 + col] > pixels[row * 9 + col + 1]:
-                value |= 1 << (row * 8 + col)
-    return f"{value:016x}"
-
-
-def hamming_distance(a: str, b: str) -> int:
-    """计算两条本插件生成的 dHash 的汉明距离。"""
-    return (int(a, 16) ^ int(b, 16)).bit_count()
-
-
 def make_kept_jpeg(src_path: str, keep_root: Path) -> tuple[str, str, str]:
     """按原图哈希留底 JPEG；动图取首帧，透明区域贴白底，同图不重写。
 
@@ -109,9 +90,7 @@ def make_kept_jpeg(src_path: str, keep_root: Path) -> tuple[str, str, str]:
             except PermissionError:
                 # Windows 上目标正被另一线程读取时不允许覆盖；同 sha 内容相同，别人写好即可
                 tmp.unlink()
-    # 新图和重复图都按最终 JPEG 算 dHash。压缩后的哈希会不同。
-    with Image.open(target) as image:
-        return sha, compute_dhash(image), str(target)
+    return sha, "", str(target)
 
 
 class VisionStore:
@@ -193,19 +172,20 @@ class VisionStore:
         dhash: str = "",
         allow_brief: bool = True,
     ) -> str | None:
-        """完整描述与问答只按原图精确命中，旧简述可近似命中；命中时更新最后使用时间。
+        """按原图哈希精确查找描述缓存；命中时更新最后使用时间。
 
         Args:
             sha256: 留底图的哈希。
             kind: 描述种类，`caption` 是完整描述，`qa` 是带问题的回答。
             question: 提问原文，只有 qa 才有。
-            dhash: 留底图指纹，仅用于旧 brief 简述的近似命中。
-            allow_brief: 缺完整描述时要不要拿旧的一句话简述凑数。展示侧要，
+            dhash: 兼容旧调用方的保留参数，不再参与近似匹配。
+            allow_brief: 缺完整描述时要不要拿同 sha256 的旧简述凑数。展示侧要，
                 因为一句也比没有强；read_image 不要，它要的是完整描述。
 
         Returns:
             命中则返回描述原文，否则返回 None。
         """
+        _ = dhash
         kinds = [kind]
         if kind == "caption" and allow_brief:
             kinds.append("brief")
@@ -218,19 +198,6 @@ class VisionStore:
                 ).fetchone()
                 if row is not None:
                     break
-            if row is None and kind == "brief" and dhash:
-                recent = self._conn.execute(
-                    "SELECT * FROM image_desc WHERE kind='brief' AND dhash!='' ORDER BY last_hit_at DESC LIMIT ?",
-                    (DHASH_SCAN_LIMIT,),
-                ).fetchall()
-                row = next(
-                    (
-                        r
-                        for r in recent
-                        if hamming_distance(dhash, r["dhash"]) <= DHASH_THRESHOLD
-                    ),
-                    None,
-                )
             if row is None:
                 return None
             self._conn.execute(
@@ -239,6 +206,51 @@ class VisionStore:
             )
             self._conn.commit()
             return row["text"]
+
+    def find_descs_many(
+        self,
+        sha256s: Sequence[str],
+        kind: str,
+        question: str = "",
+        allow_brief: bool = True,
+    ) -> dict[str, str]:
+        """按原图哈希批量查找描述缓存，命中条目合并为一次更新与提交。"""
+        unique_shas = list(dict.fromkeys(sha for sha in sha256s if sha))
+        if not unique_shas:
+            return {}
+        kinds = [kind]
+        if kind == "caption" and allow_brief:
+            kinds.append("brief")
+        sha_marks = ",".join("?" for _ in unique_shas)
+        kind_marks = ",".join("?" for _ in kinds)
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT sha256, kind, text FROM image_desc "
+                f"WHERE sha256 IN ({sha_marks}) AND kind IN ({kind_marks}) AND question=?",
+                (*unique_shas, *kinds, question),
+            ).fetchall()
+            if not rows:
+                return {}
+            # 当 kind 与 brief 同时存在时，优先使用主 kind
+            by_sha_kind = {(r["sha256"], r["kind"]): r["text"] for r in rows}
+            hits: dict[str, str] = {}
+            now = time.time()
+            updates: list[tuple[float, str, str, str]] = []
+            for sha in unique_shas:
+                for candidate in kinds:
+                    text = by_sha_kind.get((sha, candidate))
+                    if text is not None:
+                        hits[sha] = text
+                        updates.append((now, sha, candidate, question))
+                        break
+            if updates:
+                self._conn.executemany(
+                    "UPDATE image_desc SET last_hit_at=?, hit_count=hit_count+1 "
+                    "WHERE sha256=? AND kind=? AND question=?",
+                    updates,
+                )
+                self._conn.commit()
+            return hits
 
     def put_desc(
         self,

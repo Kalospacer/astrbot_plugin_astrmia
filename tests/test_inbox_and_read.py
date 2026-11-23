@@ -258,3 +258,160 @@ def test_format_ago_buckets() -> None:
     assert format_ago(5 * 60) == "5 分钟前"
     assert format_ago(3 * 3600 + 1200) == "3 小时前"
     assert format_ago(2 * 86400 + 3600) == "2 天前"
+
+
+def test_session_list_shows_unread_and_no_new_for_private_and_group(
+    tmp_path: Path,
+) -> None:
+    """私聊与群聊统一按真实未读条数显示「未读 N 条」或「无新消息」。"""
+
+    async def _run() -> None:
+        store = IrmiaStore(tmp_path / "unread_hint")
+        await store.open()
+        priv_umo = "aiocqhttp:FriendMessage:10001"
+        grp_umo = "aiocqhttp:GroupMessage:20002"
+        try:
+            # 建档消息（建档即已读）
+            await store.ensure_message_recorded(
+                umo=priv_umo, sender_id="10001", sender_name="老哥", text="首条私聊", ts=100.0
+            )
+            await store.ensure_message_recorded(
+                umo=grp_umo,
+                sender_id="20001",
+                sender_name="群友",
+                text="首条群聊",
+                ts=101.0,
+                group_name="摸鱼群",
+            )
+            # 再来 2 条私聊新消息、3 条群聊新消息
+            for i in range(2):
+                await store.ensure_message_recorded(
+                    umo=priv_umo, sender_id="10001", sender_name="老哥", text=f"私聊新{i}", ts=110.0 + i
+                )
+            for i in range(3):
+                await store.ensure_message_recorded(
+                    umo=grp_umo, sender_id="20001", sender_name="群友", text=f"群聊新{i}", ts=120.0 + i
+                )
+
+            assert store.count_unread(priv_umo, (await store.get_session_state(priv_umo))["read_up_to_id"]) == 2
+            sessions = await store.list_sessions(0.0, include_unread=True)
+            rendered = render_session_list(sessions, lambda s: s.group_name or "老哥")
+            lines = {line.split("｜sid ")[1].split("｜")[0]: line for line in rendered.splitlines()[1:]}
+            assert "｜未读 2 条｜" in lines[priv_umo]
+            assert "｜未读 3 条｜" in lines[grp_umo]
+
+            # 私聊标已读、群聊读完后全部切换为「无新消息」
+            await store.mark_session_all_read(priv_umo)
+            await execute_read_channel(store=store, sid=grp_umo, limit=20)
+            sessions_after = await store.list_sessions(0.0, include_unread=True)
+            rendered_after = render_session_list(
+                sessions_after, lambda s: s.group_name or "老哥"
+            )
+            lines_after = {
+                line.split("｜sid ")[1].split("｜")[0]: line
+                for line in rendered_after.splitlines()[1:]
+            }
+            assert "｜无新消息｜" in lines_after[priv_umo]
+            assert "｜无新消息｜" in lines_after[grp_umo]
+        finally:
+            await store.close()
+
+    asyncio.run(_run())
+
+
+async def _feed_group(store: IrmiaStore, umo: str, texts: list[str], start_ts: float) -> None:
+    for i, text in enumerate(texts):
+        await store.ensure_message_recorded(
+            umo=umo,
+            platform_id="aiocqhttp",
+            message_type="GroupMessage",
+            session_id=umo.rsplit(":", 1)[-1],
+            sender_id=f"30{i}",
+            sender_name=f"群友{i}",
+            text=text,
+            ts=start_ts + i,
+            platform_message_id=f"pm_{start_ts}_{i}",
+        )
+
+
+def test_read_channel_unread_window_without_limit(tmp_path: Path) -> None:
+    """不传 limit 时只给全部未读加两条前文：4 条未读返回 6 条，16 条未读全部可见。"""
+
+    async def _run() -> None:
+        store = IrmiaStore(tmp_path / "unread_window")
+        await store.open()
+        umo = "aiocqhttp:GroupMessage:555"
+        try:
+            await _feed_group(store, umo, [f"旧消息 {i}" for i in range(1, 21)], 1700000000.0)
+            await store.mark_session_all_read(umo)
+            await _feed_group(store, umo, [f"新消息 {i}" for i in range(1, 5)], 1700000100.0)
+
+            out = await execute_read_channel(store=store, sid=umo, summary_enabled=False)
+            assert "最近 6 条" in out
+            assert "旧消息 19" in out and "旧消息 20" in out
+            assert "旧消息 18" not in out
+            assert all(f"新消息 {i}" in out for i in range(1, 5))
+
+            await _feed_group(store, umo, [f"积压 {i}" for i in range(1, 17)], 1700000200.0)
+            out16 = await execute_read_channel(store=store, sid=umo, summary_enabled=False)
+            assert all(f"积压 {i}" in out16 for i in range(1, 17))
+            assert "最近 18 条" in out16
+            assert "没有总结" not in out16
+        finally:
+            await store.close()
+
+    asyncio.run(_run())
+
+
+def test_truncate_message_body_keeps_image_placeholders() -> None:
+    """纯文本按字数截断补省略号，图片占位符整块保留且不计字数。"""
+    from irmia.read_channel_tool import truncate_message_body
+
+    long_text = "字" * 800
+    cut = truncate_message_body(long_text, 150)
+    assert cut == "字" * 150 + "…"
+    assert truncate_message_body(long_text, 0) == long_text
+
+    mixed = "看图[图片: 一只橘猫趴在键盘上]" + "啊" * 300 + "[图片]结尾"
+    cut_mixed = truncate_message_body(mixed, 10)
+    assert cut_mixed == "看图[图片: 一只橘猫趴在键盘上]" + "啊" * 8 + "…[图片]"
+    assert truncate_message_body("短消息[图片]", 150) == "短消息[图片]"
+
+
+def test_read_channel_truncates_long_rows_and_keeps_captions(tmp_path: Path) -> None:
+    """800 字长消息按 150 字截断，带图消息的图片描述括号保持完整。"""
+
+    class _Captioner:
+        async def caption_rows(self, rows, *, wait_sec, max_new):
+            return {
+                r.id: ["一张很长很长的风景照描述" * 3]
+                for r in rows
+                if "[图片]" in r.text
+            }
+
+    async def _run() -> None:
+        store = IrmiaStore(tmp_path / "truncate")
+        await store.open()
+        umo = "aiocqhttp:GroupMessage:556"
+        try:
+            await _feed_group(store, umo, ["建档"], 1700000000.0)
+            await _feed_group(
+                store, umo, ["长" * 800, "前面的话" * 60 + "[图片]"], 1700000100.0
+            )
+            out = await execute_read_channel(
+                store=store,
+                sid=umo,
+                summary_enabled=False,
+                captioner=_Captioner(),
+                image_brief_max_chars=20,
+                msg_max_chars=150,
+            )
+            long_line = next(line for line in out.splitlines() if "长长" in line)
+            assert ("长" * 150 + "…") in long_line and ("长" * 151) not in long_line
+            image_line = next(line for line in out.splitlines() if "前面的话" in line)
+            assert image_line.count("[图片: ") == 1 and image_line.endswith("]")
+            assert "…[图片: " in image_line
+        finally:
+            await store.close()
+
+    asyncio.run(_run())
